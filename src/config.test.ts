@@ -473,6 +473,7 @@ describe("DEFAULT_CONFIG", () => {
 		expect(DEFAULT_CONFIG.watchdog).toBeDefined();
 		expect(DEFAULT_CONFIG.models).toBeDefined();
 		expect(DEFAULT_CONFIG.logging).toBeDefined();
+		expect(DEFAULT_CONFIG.codex).toBeDefined();
 	});
 
 	test("has sensible default values", () => {
@@ -483,5 +484,11 @@ describe("DEFAULT_CONFIG", () => {
 		expect(DEFAULT_CONFIG.watchdog.tier0IntervalMs).toBe(30_000);
 		expect(DEFAULT_CONFIG.watchdog.staleThresholdMs).toBe(300_000);
 		expect(DEFAULT_CONFIG.watchdog.zombieThresholdMs).toBe(600_000);
+		expect(DEFAULT_CONFIG.codex.enabled).toBe(false);
+		expect(DEFAULT_CONFIG.codex.serverPort).toBe(21816);
+		expect(DEFAULT_CONFIG.codex.model).toBe("codex-mini-latest");
+		expect(DEFAULT_CONFIG.codex.compactionThreshold).toBe(0.8);
+		expect(DEFAULT_CONFIG.codex.maxDeltaBufferBytes).toBe(1_048_576);
+		expect(DEFAULT_CONFIG.codex.approvalTimeoutMs).toBe(60_000);
 	});
 });

@@ -534,6 +534,15 @@ describe("resolveModel", () => {
 			},
 			models,
 			logging: { verbose: false, redactSecrets: true },
+			codex: {
+				enabled: false,
+				defaultRuntime: {},
+				serverPort: 21816,
+				model: "codex-mini-latest",
+				compactionThreshold: 0.8,
+				maxDeltaBufferBytes: 1_048_576,
+				approvalTimeoutMs: 60_000,
+			},
 		};
 	}
 
