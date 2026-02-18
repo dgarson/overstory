@@ -1,11 +1,6 @@
 // src/codex/events.test.ts
-import { describe, test, expect } from "bun:test";
-import {
-	normalizeItemStarted,
-	normalizeItemCompleted,
-	createDeltaBufferManager,
-	normalizeToolName,
-} from "./events";
+import { describe, expect, test } from "bun:test";
+import { createDeltaBufferManager, normalizeItemStarted, normalizeToolName } from "./events";
 
 describe("normalizeToolName", () => {
 	test("maps commandExecution to Bash", () => {
@@ -35,9 +30,9 @@ describe("createDeltaBufferManager", () => {
 
 		const result = mgr.flush("item-1");
 		expect(result).toBeDefined();
-		expect(result!.output).toBe("hello world");
-		expect(result!.totalBytes).toBe(11);
-		expect(result!.truncated).toBe(false);
+		expect(result?.output).toBe("hello world");
+		expect(result?.totalBytes).toBe(11);
+		expect(result?.truncated).toBe(false);
 	});
 
 	test("truncates when exceeding max buffer size", () => {
@@ -48,8 +43,8 @@ describe("createDeltaBufferManager", () => {
 
 		const result = mgr.flush("item-1");
 		expect(result).toBeDefined();
-		expect(result!.truncated).toBe(true);
-		expect(result!.totalBytes).toBe(20);
+		expect(result?.truncated).toBe(true);
+		expect(result?.totalBytes).toBe(20);
 	});
 
 	test("returns null for unknown item", () => {

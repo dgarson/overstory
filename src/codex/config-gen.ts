@@ -1,6 +1,7 @@
 // src/codex/config-gen.ts
-import { join } from "node:path";
+
 import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
 
 interface CodexConfigOptions {
 	model: string;

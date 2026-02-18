@@ -1,5 +1,4 @@
 import { join, resolve } from "node:path";
-import type { OverlayConfig } from "../types";
 import {
 	formatCanSpawn,
 	formatConstraints,
@@ -8,6 +7,7 @@ import {
 	formatMulchExpertise,
 	formatQualityGates,
 } from "../agents/overlay";
+import type { OverlayConfig } from "../types";
 
 function getTemplatePath(): string {
 	// src/codex/overlay.ts -> repo root is ../../

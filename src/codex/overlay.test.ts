@@ -1,6 +1,6 @@
-import { describe, test, expect } from "bun:test";
-import { generateAgentsOverlay } from "./overlay";
+import { expect, test } from "bun:test";
 import type { OverlayConfig } from "../types";
+import { generateAgentsOverlay } from "./overlay";
 
 const baseConfig: OverlayConfig = {
 	agentName: "builder-1",

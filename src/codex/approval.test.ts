@@ -1,5 +1,5 @@
 // src/codex/approval.test.ts
-import { describe, test, expect } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { evaluateCommandApproval, evaluateFileChangeApproval } from "./approval";
 
 describe("evaluateCommandApproval", () => {

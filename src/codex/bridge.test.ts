@@ -1,5 +1,5 @@
 // src/codex/bridge.test.ts
-import { describe, test, expect } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { parseBridgeConfig, shouldShutdown } from "./bridge";
 
 describe("parseBridgeConfig", () => {
