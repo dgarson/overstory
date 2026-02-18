@@ -16,7 +16,7 @@ function getTemplatePath(): string {
  * Format the file scope list as a markdown bullet list.
  * Returns a human-readable fallback if no files are scoped.
  */
-function formatFileScope(fileScope: readonly string[]): string {
+export function formatFileScope(fileScope: readonly string[]): string {
 	if (fileScope.length === 0) {
 		return "No file scope restrictions";
 	}
@@ -27,7 +27,7 @@ function formatFileScope(fileScope: readonly string[]): string {
  * Format mulch domains as a `mulch prime` command.
  * Returns a human-readable fallback if no domains are configured.
  */
-function formatMulchDomains(domains: readonly string[]): string {
+export function formatMulchDomains(domains: readonly string[]): string {
 	if (domains.length === 0) {
 		return "No specific expertise domains configured";
 	}
@@ -40,7 +40,7 @@ function formatMulchDomains(domains: readonly string[]): string {
  * When expertise IS provided, renders it under a 'Pre-loaded Expertise' heading
  * with a brief intro explaining it was loaded at spawn time based on file scope.
  */
-function formatMulchExpertise(expertise: string | undefined): string {
+export function formatMulchExpertise(expertise: string | undefined): string {
 	if (!expertise || expertise.trim().length === 0) {
 		return "";
 	}
@@ -61,7 +61,7 @@ const READ_ONLY_CAPABILITIES = new Set(["scout", "reviewer"]);
  * a lightweight section that only tells them to close the issue and report.
  * Writable agents get the full quality gates (tests, lint, build, commit).
  */
-function formatQualityGates(config: OverlayConfig): string {
+export function formatQualityGates(config: OverlayConfig): string {
 	if (READ_ONLY_CAPABILITIES.has(config.capability)) {
 		return [
 			"## Completion",
@@ -98,7 +98,7 @@ function formatQualityGates(config: OverlayConfig): string {
  * Format the constraints section. Read-only agents get read-only constraints.
  * Writable agents get file-scope and branch constraints.
  */
-function formatConstraints(config: OverlayConfig): string {
+export function formatConstraints(config: OverlayConfig): string {
 	if (READ_ONLY_CAPABILITIES.has(config.capability)) {
 		return [
 			"## Constraints",
@@ -127,7 +127,7 @@ function formatConstraints(config: OverlayConfig): string {
  * Format the can-spawn section. If the agent can spawn sub-workers,
  * include an example sling command. Otherwise, state the restriction.
  */
-function formatCanSpawn(config: OverlayConfig): string {
+export function formatCanSpawn(config: OverlayConfig): string {
 	if (!config.canSpawn) {
 		return "You may NOT spawn sub-workers.";
 	}

@@ -42,6 +42,24 @@ export interface OverstoryConfig {
 		verbose: boolean;
 		redactSecrets: boolean;
 	};
+	codex: CodexConfig;
+}
+
+export interface CodexConfig {
+	/** Whether Codex backend is enabled */
+	enabled: boolean;
+	/** Default runtime per capability (fallback: "claude") */
+	defaultRuntime: Partial<Record<string, AgentRuntime>>;
+	/** WebSocket port for shared app-server */
+	serverPort: number;
+	/** Model to use for Codex agents (OpenAI model ID) */
+	model: string;
+	/** Token usage threshold (0-1) to trigger checkpoint before compaction */
+	compactionThreshold: number;
+	/** Max delta buffer size in bytes before truncation */
+	maxDeltaBufferBytes: number;
+	/** Approval escalation timeout in ms */
+	approvalTimeoutMs: number;
 }
 
 // === Agent Manifest ===
@@ -80,6 +98,9 @@ export type Capability = (typeof SUPPORTED_CAPABILITIES)[number];
 
 export type AgentState = "booting" | "working" | "completed" | "stalled" | "zombie";
 
+/** Execution runtime for an agent */
+export type AgentRuntime = "claude" | "codex";
+
 export interface AgentSession {
 	id: string; // Unique session ID
 	agentName: string; // Unique per-session name
@@ -97,6 +118,7 @@ export interface AgentSession {
 	lastActivity: string;
 	escalationLevel: number; // Progressive nudge stage: 0=warn, 1=nudge, 2=escalate, 3=terminate
 	stalledSince: string | null; // ISO timestamp when agent first entered stalled state
+	runtime: AgentRuntime; // Which execution backend powers this agent
 }
 
 // === Agent Identity ===

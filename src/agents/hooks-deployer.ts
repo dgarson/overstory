@@ -7,7 +7,7 @@ import { AgentError } from "../errors.ts";
  * Includes read-only roles (scout, reviewer) and coordination roles (lead).
  * Only "builder" and "merger" are allowed to modify files.
  */
-const NON_IMPLEMENTATION_CAPABILITIES = new Set([
+export const NON_IMPLEMENTATION_CAPABILITIES = new Set([
 	"scout",
 	"reviewer",
 	"lead",
@@ -20,14 +20,14 @@ const NON_IMPLEMENTATION_CAPABILITIES = new Set([
  * Capabilities that coordinate work and need git add/commit for syncing
  * beads, mulch, and other metadata — but must NOT git push.
  */
-const COORDINATION_CAPABILITIES = new Set(["coordinator", "supervisor", "monitor"]);
+export const COORDINATION_CAPABILITIES = new Set(["coordinator", "supervisor", "monitor"]);
 
 /**
  * Additional safe Bash prefixes for coordination capabilities.
  * Allows git add/commit for beads sync, mulch records, etc.
  * git push remains blocked via DANGEROUS_BASH_PATTERNS.
  */
-const COORDINATION_SAFE_PREFIXES = ["git add", "git commit"];
+export const COORDINATION_SAFE_PREFIXES = ["git add", "git commit"];
 
 /**
  * Claude Code native team/task tools that bypass overstory orchestration.
@@ -53,7 +53,7 @@ const WRITE_TOOLS = ["Write", "Edit", "NotebookEdit"];
  * Bash commands that modify files and must be blocked for non-implementation agents.
  * Each pattern is a regex fragment used inside a grep -qE check.
  */
-const DANGEROUS_BASH_PATTERNS = [
+export const DANGEROUS_BASH_PATTERNS = [
 	"sed\\s+-i",
 	"sed\\s+--in-place",
 	"echo\\s+.*>",
@@ -98,7 +98,7 @@ const DANGEROUS_BASH_PATTERNS = [
  * If a command starts with any of these prefixes, it bypasses the dangerous command check.
  * This whitelist is checked BEFORE the blocklist.
  */
-const SAFE_BASH_PREFIXES = [
+export const SAFE_BASH_PREFIXES = [
 	"overstory ",
 	"bd ",
 	"git status",
