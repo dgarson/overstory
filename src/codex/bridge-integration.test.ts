@@ -97,9 +97,9 @@ describe("runBridge integration", () => {
 			expect(threadReq).toBeDefined();
 			expect(threadReq?.params?.model).toBe("o3");
 
-			// Verify turn/start included an input prompt
+			// Verify turn/start included an input prompt (v2 UserInput array format)
 			expect(turnReq.params?.input).toBeDefined();
-			expect(typeof turnReq.params?.input).toBe("string");
+			expect(Array.isArray(turnReq.params?.input)).toBe(true);
 
 			// Shut down via WebSocket disconnection
 			await shutdownBridge(bridgePromise);

@@ -158,19 +158,25 @@ export async function createMockCodexServer(): Promise<MockCodexServer> {
 
 		if (method === "thread/start") {
 			const threadId = `test-thread-${Math.random().toString(36).slice(2, 8)}`;
-			sendResponse(ws, req.id, { threadId });
+			// v2 response wraps threadId in a thread object
+			sendResponse(ws, req.id, { thread: { id: threadId } });
 			return;
 		}
 
 		if (method === "turn/start") {
 			const turnId = `test-turn-${Math.random().toString(36).slice(2, 8)}`;
-			sendResponse(ws, req.id, { turnId });
+			// v2 response wraps turnId in a turn object
+			sendResponse(ws, req.id, { turn: { id: turnId, status: "inProgress" } });
 
 			// After a short delay, emit turn/started notification.
 			// Uses setTimeout to ensure delivery via macrotask.
 			const threadId = (req.params?.threadId as string | undefined) ?? "unknown-thread";
 			setTimeout(() => {
-				sendNotificationToAll("turn/started", { threadId, turnId });
+				// v2 notification wraps turn data in a turn object
+				sendNotificationToAll("turn/started", {
+					threadId,
+					turn: { id: turnId, status: "inProgress" },
+				});
 			}, 30);
 			return;
 		}

@@ -601,6 +601,7 @@ export async function slingCommand(args: string[]): Promise<void> {
 		// 14. Output result
 		const output = {
 			agentName: name,
+			sessionId,
 			capability,
 			taskId,
 			branch: branchName,

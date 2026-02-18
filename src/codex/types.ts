@@ -32,7 +32,7 @@ export interface ThreadStartParams {
 }
 
 export interface ThreadStartResult {
-	threadId: string;
+	thread: { id: string };
 }
 
 export interface SandboxPolicy {
