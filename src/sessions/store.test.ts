@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentSession, AgentState, InsertRun, Run, RunStore } from "../types.ts";
+import type { AgentRuntime, AgentSession, AgentState, InsertRun, Run, RunStore } from "../types.ts";
 import { createRunStore, createSessionStore, type SessionStore } from "./store.ts";
 
 let tempDir: string;
@@ -46,6 +46,7 @@ function makeSession(overrides: Partial<AgentSession> = {}): AgentSession {
 		lastActivity: "2026-01-15T10:00:00.000Z",
 		escalationLevel: 0,
 		stalledSince: null,
+		runtime: "claude" as AgentRuntime,
 		...overrides,
 	};
 }
