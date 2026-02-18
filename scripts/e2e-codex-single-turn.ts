@@ -4,6 +4,7 @@
  *
  * Requires:
  *   - `codex` CLI installed and authenticated (`codex --version`)
+ *   - `bd` (beads) CLI installed if beads is enabled in config
  *   - A git repository with `overstory init` already run
  *   - Run from the overstory project root (where .overstory/ and src/index.ts exist)
  *
@@ -26,16 +27,40 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 const PROJECT_ROOT = process.cwd();
-const OVERSTORY_DIR = join(PROJECT_ROOT, ".overstory");
 const OVERSTORY_BIN = join(PROJECT_ROOT, "src", "index.ts");
 const CLEANUP = process.argv.includes("--cleanup");
+
+/**
+ * Resolve the canonical project root (handles git worktrees).
+ * Mirrors the logic in src/config.ts resolveProjectRoot().
+ */
+async function resolveCanonicalRoot(): Promise<string> {
+	const proc = Bun.spawn(["git", "rev-parse", "--git-common-dir"], {
+		cwd: PROJECT_ROOT,
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const exitCode = await proc.exited;
+	if (exitCode === 0) {
+		const gitCommonDir = (await new Response(proc.stdout).text()).trim();
+		const absGitCommon = resolve(PROJECT_ROOT, gitCommonDir);
+		const mainRoot = dirname(absGitCommon);
+		if (existsSync(join(mainRoot, ".overstory", "config.yaml"))) {
+			return mainRoot;
+		}
+	}
+	return PROJECT_ROOT;
+}
+
+const CANONICAL_ROOT = await resolveCanonicalRoot();
+const OVERSTORY_DIR = join(CANONICAL_ROOT, ".overstory");
 
 function log(section: string, msg: string): void {
 	const ts = new Date().toISOString().slice(11, 19);
@@ -55,15 +80,20 @@ async function run(
 	cmd: string[],
 	opts?: { cwd?: string },
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-	const proc = Bun.spawn(cmd, {
-		cwd: opts?.cwd ?? PROJECT_ROOT,
-		stdout: "pipe",
-		stderr: "pipe",
-	});
-	const exitCode = await proc.exited;
-	const stdout = await new Response(proc.stdout).text();
-	const stderr = await new Response(proc.stderr).text();
-	return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
+	try {
+		const proc = Bun.spawn(cmd, {
+			cwd: opts?.cwd ?? PROJECT_ROOT,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const exitCode = await proc.exited;
+		const stdout = await new Response(proc.stdout).text();
+		const stderr = await new Response(proc.stderr).text();
+		return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		return { stdout: "", stderr: msg, exitCode: 127 };
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -92,7 +122,7 @@ if (gitCheck.stdout !== "true") {
 // ---------------------------------------------------------------------------
 
 const AGENT_NAME = `e2e-codex-${Date.now().toString(36)}`;
-const TASK_ID = `e2e-${AGENT_NAME}`;
+const TASK_ID = AGENT_NAME;
 
 log("spec", `Writing spec for task ${TASK_ID}`);
 
@@ -126,6 +156,32 @@ if (specResult.exitCode !== 0) {
 pass("Spec written");
 
 // ---------------------------------------------------------------------------
+// 1b. Create a beads issue (required when beads.enabled=true in config)
+// ---------------------------------------------------------------------------
+
+const bdCheck = await run(["bd", "--version"]);
+if (bdCheck.exitCode !== 0) {
+	fail(
+		"'bd' (beads CLI) not found. Either install beads, or set beads.enabled=false in .overstory/config.yaml",
+	);
+}
+
+const bdCreate = await run([
+	"bd",
+	"create",
+	"--id",
+	TASK_ID,
+	"--title",
+	`E2E Codex test: ${TASK_ID}`,
+	"--body",
+	"Automated E2E test issue — create hello-e2e.txt via Codex bridge",
+]);
+if (bdCreate.exitCode !== 0) {
+	fail(`bd create failed: ${bdCreate.stderr}\n${bdCreate.stdout}`);
+}
+pass("Beads issue created");
+
+// ---------------------------------------------------------------------------
 // 2. Spawn a Codex builder agent via overstory sling
 // ---------------------------------------------------------------------------
 
@@ -147,6 +203,7 @@ const slingResult = await run([
 	"hello-e2e.txt",
 	"--spec",
 	join(OVERSTORY_DIR, "specs", `${TASK_ID}.md`),
+	"--force-hierarchy",
 	"--json",
 ]);
 
@@ -330,6 +387,9 @@ if (CLEANUP) {
 		await rm(specPath);
 		log("cleanup", `Removed spec: ${specPath}`);
 	}
+
+	await run(["bd", "close", TASK_ID, "--reason", "E2E test cleanup"]);
+	log("cleanup", `Closed beads issue: ${TASK_ID}`);
 
 	pass("Cleanup complete");
 } else {
