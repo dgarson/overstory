@@ -9,6 +9,7 @@
 
 import { agentsCommand } from "./commands/agents.ts";
 import { cleanCommand } from "./commands/clean.ts";
+import { codexCommand } from "./commands/codex.ts";
 import { completionsCommand } from "./commands/completions.ts";
 import { coordinatorCommand } from "./commands/coordinator.ts";
 import { costsCommand } from "./commands/costs.ts";
@@ -115,6 +116,7 @@ const COMMANDS = [
 	"run",
 	"costs",
 	"metrics",
+	"codex",
 ];
 
 function editDistance(a: string, b: string): number {
@@ -275,6 +277,9 @@ async function main(): Promise<void> {
 			break;
 		case "metrics":
 			await metricsCommand(commandArgs);
+			break;
+		case "codex":
+			await codexCommand(commandArgs);
 			break;
 		default: {
 			process.stderr.write(`Unknown command: ${command}\n`);
