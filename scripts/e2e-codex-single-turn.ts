@@ -5,7 +5,7 @@
  * Requires:
  *   - `codex` CLI installed and authenticated (`codex --version`)
  *   - A git repository with `overstory init` already run
- *   - Run from the project root (where .overstory/ exists)
+ *   - Run from the overstory project root (where .overstory/ and src/index.ts exist)
  *
  * What it tests (end-to-end with real Codex API):
  *   1. Shared Codex App Server starts (or reuses existing)
@@ -34,6 +34,7 @@ import { join } from "node:path";
 
 const PROJECT_ROOT = process.cwd();
 const OVERSTORY_DIR = join(PROJECT_ROOT, ".overstory");
+const OVERSTORY_BIN = join(PROJECT_ROOT, "src", "index.ts");
 const CLEANUP = process.argv.includes("--cleanup");
 
 function log(section: string, msg: string): void {
@@ -109,7 +110,16 @@ const specBody = [
 	"Just create the file and echo done.",
 ].join("\n");
 
-const specResult = await run(["overstory", "spec", "write", TASK_ID, "--body", specBody]);
+const specResult = await run([
+	"bun",
+	"run",
+	OVERSTORY_BIN,
+	"spec",
+	"write",
+	TASK_ID,
+	"--body",
+	specBody,
+]);
 if (specResult.exitCode !== 0) {
 	fail(`overstory spec write failed: ${specResult.stderr}`);
 }
@@ -122,7 +132,9 @@ pass("Spec written");
 log("sling", `Spawning agent ${AGENT_NAME} with --runtime codex`);
 
 const slingResult = await run([
-	"overstory",
+	"bun",
+	"run",
+	OVERSTORY_BIN,
 	"sling",
 	TASK_ID,
 	"--name",
@@ -172,7 +184,7 @@ while (elapsed < MAX_WAIT_S) {
 	await Bun.sleep(POLL_INTERVAL_S * 1000);
 	elapsed += POLL_INTERVAL_S;
 
-	const statusResult = await run(["overstory", "status", "--json"]);
+	const statusResult = await run(["bun", "run", OVERSTORY_BIN, "status", "--json"]);
 	if (statusResult.exitCode !== 0) {
 		log("poll", `status check failed (${elapsed}s): ${statusResult.stderr}`);
 		continue;
@@ -207,7 +219,16 @@ log("poll", `Agent reached state: ${finalState} after ${elapsed}s`);
 log("verify", "Checking outcomes...");
 
 // 4a. Check EventStore for agent events
-const traceResult = await run(["overstory", "trace", AGENT_NAME, "--limit", "30", "--json"]);
+const traceResult = await run([
+	"bun",
+	"run",
+	OVERSTORY_BIN,
+	"trace",
+	AGENT_NAME,
+	"--limit",
+	"30",
+	"--json",
+]);
 if (traceResult.exitCode === 0) {
 	try {
 		const events = JSON.parse(traceResult.stdout) as Array<{ eventType: string }>;
@@ -233,7 +254,16 @@ if (traceResult.exitCode === 0) {
 }
 
 // 4b. Check mail for worker_done
-const mailResult = await run(["overstory", "mail", "list", "--from", AGENT_NAME, "--json"]);
+const mailResult = await run([
+	"bun",
+	"run",
+	OVERSTORY_BIN,
+	"mail",
+	"list",
+	"--from",
+	AGENT_NAME,
+	"--json",
+]);
 if (mailResult.exitCode === 0) {
 	try {
 		const messages = JSON.parse(mailResult.stdout) as Array<{ type: string; subject: string }>;
