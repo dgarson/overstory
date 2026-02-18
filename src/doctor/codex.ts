@@ -6,10 +6,7 @@ import type { DoctorCheck, DoctorCheckFn } from "./types.ts";
  * Validates that the codex CLI is installed and, if codex is enabled,
  * that the shared App Server is running.
  */
-export const checkCodex: DoctorCheckFn = async (
-	config,
-	overstoryDir,
-): Promise<DoctorCheck[]> => {
+export const checkCodex: DoctorCheckFn = async (config, overstoryDir): Promise<DoctorCheck[]> => {
 	const checks: DoctorCheck[] = [];
 
 	// Check if codex CLI is installed
