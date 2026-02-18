@@ -175,6 +175,7 @@ const bdCreate = await run([
 	`E2E Codex test: ${TASK_ID}`,
 	"--body",
 	"Automated E2E test issue — create hello-e2e.txt via Codex bridge",
+	"--force",
 ]);
 if (bdCreate.exitCode !== 0) {
 	fail(`bd create failed: ${bdCreate.stderr}\n${bdCreate.stdout}`);
@@ -220,11 +221,10 @@ try {
 	fail(`Failed to parse sling JSON output:\n${slingResult.stdout}`);
 }
 
-const worktreePath = slingOutput.worktreePath as string | undefined;
+const worktreePath = slingOutput.worktree as string | undefined;
 const tmuxSession = slingOutput.tmuxSession as string | undefined;
-const sessionId = slingOutput.sessionId as string | undefined;
 
-pass(`Agent spawned: session=${sessionId}, tmux=${tmuxSession}`);
+pass(`Agent spawned: worktree=${worktreePath}, tmux=${tmuxSession}`);
 
 // ---------------------------------------------------------------------------
 // 3. Poll for agent completion
@@ -249,9 +249,9 @@ while (elapsed < MAX_WAIT_S) {
 
 	try {
 		const status = JSON.parse(statusResult.stdout) as {
-			agents?: Array<{ name: string; state: string }>;
+			agents?: Array<{ agentName: string; state: string }>;
 		};
-		const agent = status.agents?.find((a) => a.name === AGENT_NAME);
+		const agent = status.agents?.find((a) => a.agentName === AGENT_NAME);
 		finalState = agent?.state ?? "not_found";
 	} catch {
 		finalState = "parse_error";

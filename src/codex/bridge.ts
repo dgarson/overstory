@@ -21,7 +21,6 @@ import type {
 	BridgeConfig,
 	ItemCompletedParams,
 	ItemStartedParams,
-	OutputDeltaParams,
 	ThreadStartResult,
 	TokenUsageParams,
 	TurnCompletedParams,
@@ -358,18 +357,37 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 
 	const rpc = await createRpcClient(config.serverUrl);
 
-	// Initialize the server session
-	await rpc.request("initialize", {});
+	// Initialize the server session (clientInfo is required by Codex App Server)
+	await rpc.request("initialize", {
+		clientInfo: {
+			name: "overstory-bridge",
+			title: `Overstory Bridge (${config.agentName})`,
+			version: "0.1.0",
+		},
+		capabilities: null,
+	});
+
+	// Load system instructions from AGENTS.md in the worktree.
+	// The Codex App Server needs these as the `instructions` parameter so the model
+	// knows its role, tools, and constraints. Without them, the model responds with
+	// plain text and never uses tools.
+	let instructions: string | undefined;
+	const agentsMdPath = join(config.worktreePath, "AGENTS.md");
+	if (existsSync(agentsMdPath)) {
+		instructions = readFileSync(agentsMdPath, "utf-8");
+	}
 
 	// Start a new thread for this agent
 	const threadResult = (await rpc.request("thread/start", {
 		cwd: config.worktreePath,
 		model: config.model,
-		sandboxPolicy: { type: "dangerFullAccess" },
+		instructions: instructions ?? "",
+		sandbox: "danger-full-access",
 		approvalPolicy: "on-request",
+		experimentalRawEvents: false,
 	})) as ThreadStartResult;
 
-	const threadId = threadResult.threadId;
+	const threadId = threadResult.thread.id;
 
 	// Delta buffer manager for accumulating streamed output per item
 	const deltaManager = createDeltaBufferManager(config.maxDeltaBufferBytes);
@@ -535,8 +553,8 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 			rpc
 				.request("turn/steer", {
 					threadId,
-					turnId: activeTurnId,
-					input: `New messages:\n${summary}`,
+					expectedTurnId: activeTurnId,
+					input: [{ type: "text", text: `New messages:\n${summary}`, text_elements: [] }],
 				} as Record<string, unknown>)
 				.catch((err: unknown) => {
 					console.error("[bridge] debounced mail steer failed:", err);
@@ -563,13 +581,16 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 		// turn/completed — check if we should shut down.
 		// MUST be checked before item/completed's endsWith("/completed") wildcard,
 		// which would otherwise swallow turn/completed notifications.
+		// v2 format: { threadId, turn: { id, status, ... } }
 		if (method === "turn/completed") {
-			const turn = p as TurnCompletedParams | undefined;
-			if (!turn) return;
+			if (!p) return;
 
 			activeTurnId = null;
 
-			if (shouldShutdown(turn.status)) {
+			// Extract status from v2 nested structure or flat v1 structure
+			const turnObj = p.turn as { status?: string } | undefined;
+			const status = turnObj?.status ?? (p as unknown as TurnCompletedParams).status;
+			if (status && shouldShutdown(status)) {
 				shutdownRequested = true;
 				shutdownResolve?.();
 			}
@@ -578,29 +599,46 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 		// turn/started — track the active turn ID and check for pending messages.
 		// MUST be checked before item/started's endsWith("/started") wildcard,
 		// which would otherwise swallow turn/started notifications.
+		// v2 format: { threadId, turn: { id, status, ... } }
 		else if (method === "turn/started") {
-			const turn = p as { threadId: string; turnId: string } | undefined;
-			if (turn) {
-				activeTurnId = turn.turnId;
+			if (!p) return;
+			const turnObj = p.turn as { id?: string } | undefined;
+			const turnId = turnObj?.id ?? (p.turnId as string | undefined);
+			if (turnId) {
+				activeTurnId = turnId;
 				// Check for messages that arrived between turns
 				debouncedMailCheck();
 			}
 		}
 
 		// item/started — record tool_start event
+		// v2 format: { item: { type, id, ... }, threadId, turnId }
 		else if (method === "item/started" || method.endsWith("/started")) {
-			const started = p as ItemStartedParams | undefined;
-			if (!started) return;
-			itemStartTimes.set(started.itemId, Date.now());
-			deltaManager.start(started.itemId, started.itemType, new Date().toISOString());
+			if (!p) return;
+			// Extract from v2 nested structure or flat v1 structure
+			const v2Item = (p as Record<string, unknown>).item as Record<string, unknown> | undefined;
+			const itemId = (v2Item?.id ?? (p as unknown as ItemStartedParams).itemId) as
+				| string
+				| undefined;
+			const itemType = (v2Item?.type ?? (p as unknown as ItemStartedParams).itemType) as
+				| string
+				| undefined;
+			if (!itemId || !itemType) return;
+
+			itemStartTimes.set(itemId, Date.now());
+			deltaManager.start(
+				itemId,
+				itemType as ItemStartedParams["itemType"],
+				new Date().toISOString(),
+			);
 
 			const record = normalizeItemStarted({
 				agentName: config.agentName,
 				sessionId: config.sessionId,
 				runId: config.runId,
-				itemId: started.itemId,
-				itemType: started.itemType,
-				data: started.data,
+				itemId,
+				itemType: itemType as ItemStartedParams["itemType"],
+				data: v2Item ?? (p as unknown as ItemStartedParams).data,
 			});
 
 			const startLevel = VALID_LEVELS.has(record.level) ? (record.level as EventLevel) : "info";
@@ -626,30 +664,48 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 			method.endsWith("/delta") ||
 			method.endsWith("/summaryTextDelta")
 		) {
-			const delta = p as OutputDeltaParams | undefined;
-			if (!delta) return;
-			deltaManager.appendDelta(delta.itemId, delta.delta);
+			if (!p) return;
+			// v2 delta notifications may use different field names
+			const raw = p as Record<string, unknown>;
+			const itemId = (raw.itemId ?? raw.id) as string | undefined;
+			const delta = (raw.delta ?? raw.text) as string | undefined;
+			if (itemId && delta) {
+				deltaManager.appendDelta(itemId, delta);
+			}
 		}
 
 		// item/completed — flush buffer, record tool_end event
+		// v2 format: { item: { type, id, ... }, threadId, turnId }
 		else if (method === "item/completed" || method.endsWith("/completed")) {
-			const completed = p as ItemCompletedParams | undefined;
-			if (!completed) return;
+			if (!p) return;
+			// Extract from v2 nested structure or flat v1 structure
+			const v2Item = (p as Record<string, unknown>).item as Record<string, unknown> | undefined;
+			const itemId = (v2Item?.id ?? (p as unknown as ItemCompletedParams).itemId) as
+				| string
+				| undefined;
+			const itemType = (v2Item?.type ?? (p as unknown as ItemCompletedParams).itemType) as
+				| string
+				| undefined;
+			// v2 items have a 'status' field per item type (e.g. CommandExecutionStatus)
+			const itemStatus = (v2Item?.status ??
+				(p as unknown as ItemCompletedParams).status ??
+				"completed") as string;
+			if (!itemId || !itemType) return;
 
-			const startTime = itemStartTimes.get(completed.itemId);
-			itemStartTimes.delete(completed.itemId);
+			const startTime = itemStartTimes.get(itemId);
+			itemStartTimes.delete(itemId);
 			const durationMs = startTime !== undefined ? Date.now() - startTime : null;
 
-			const deltaOutput = deltaManager.flush(completed.itemId);
+			const deltaOutput = deltaManager.flush(itemId);
 
 			const record = normalizeItemCompleted({
 				agentName: config.agentName,
 				sessionId: config.sessionId,
 				runId: config.runId,
-				itemId: completed.itemId,
-				itemType: completed.itemType,
-				status: completed.status,
-				data: completed.data,
+				itemId,
+				itemType: itemType as ItemCompletedParams["itemType"],
+				status: itemStatus as ItemCompletedParams["status"],
+				data: v2Item ?? (p as unknown as ItemCompletedParams).data,
 				deltaOutput,
 				durationMs,
 			});
@@ -668,10 +724,15 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 			});
 
 			// Track modified files for checkpoint building (compaction support)
-			if (completed.itemType === "fileChange") {
-				const data = completed.data as { path?: string } | undefined;
-				if (data?.path) {
-					modifiedFiles.add(data.path);
+			if (itemType === "fileChange") {
+				const changes = v2Item?.changes as Array<{ path?: string }> | undefined;
+				if (changes) {
+					for (const c of changes) {
+						if (c.path) modifiedFiles.add(c.path);
+					}
+				} else {
+					const data = (p as unknown as ItemCompletedParams).data as { path?: string } | undefined;
+					if (data?.path) modifiedFiles.add(data.path);
 				}
 			}
 
@@ -748,7 +809,11 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 
 		// contextCompaction — Phase 2: post-compaction recovery.
 		// Load the saved checkpoint and inject recovery context via turn/steer.
-		else if (method === "contextCompaction" || method.endsWith("/contextCompaction")) {
+		else if (
+			method === "contextCompaction" ||
+			method === "thread/compacted" ||
+			method.endsWith("/contextCompaction")
+		) {
 			const identityBaseDir = join(overstoryDir, "agents");
 			loadCheckpoint(identityBaseDir, config.agentName)
 				.then((checkpoint) => {
@@ -764,8 +829,8 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 
 					return rpc.request("turn/steer", {
 						threadId,
-						turnId: activeTurnId,
-						input: recovery,
+						expectedTurnId: activeTurnId,
+						input: [{ type: "text", text: recovery, text_elements: [] }],
 					} as Record<string, unknown>);
 				})
 				.catch((err: unknown) => {
@@ -791,15 +856,30 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 	// Build rich priming prompt (mirrors Claude path's beacon + SessionStart hook)
 	const initialPrompt = await buildInitialPrompt(config, overstoryDir);
 
-	// Start the initial turn with the agent's task instructions
+	// Start the initial turn with the agent's task instructions.
+	// The v2 API expects input as an array of UserInput objects.
 	const turnStartResult = (await rpc.request("turn/start", {
 		threadId,
-		input: initialPrompt,
-	})) as { turnId?: string } | undefined;
+		input: [{ type: "text", text: initialPrompt, text_elements: [] }],
+	})) as { turn?: { id: string } } | undefined;
 
 	// Capture initial turn ID if returned synchronously
-	if (turnStartResult?.turnId !== undefined) {
-		activeTurnId = turnStartResult.turnId;
+	if (turnStartResult?.turn?.id !== undefined) {
+		activeTurnId = turnStartResult.turn.id;
+	}
+
+	// Transition from "booting" to "working" now that the turn has started.
+	// In the Claude Code path, hooks handle this transition via updateLastActivity().
+	// The bridge must do it explicitly since there are no hooks in the Codex runtime.
+	try {
+		const { store: sessionStore } = openSessionStore(overstoryDir);
+		try {
+			sessionStore.updateState(config.agentName, "working");
+		} finally {
+			sessionStore.close();
+		}
+	} catch {
+		// Non-fatal: state transition failure shouldn't block the bridge
 	}
 
 	// Write PID file so nudge can find the bridge process directly
@@ -825,8 +905,8 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 			rpc
 				.request("turn/steer", {
 					threadId,
-					turnId: activeTurnId,
-					input: `New messages:\n${summary}`,
+					expectedTurnId: activeTurnId,
+					input: [{ type: "text", text: `New messages:\n${summary}`, text_elements: [] }],
 				} as Record<string, unknown>)
 				.catch((err: unknown) => {
 					console.error("[bridge] turn/steer failed:", err);
