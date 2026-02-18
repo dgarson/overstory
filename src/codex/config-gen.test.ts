@@ -1,5 +1,5 @@
 // src/codex/config-gen.test.ts
-import { describe, test, expect } from "bun:test";
+import { expect, test } from "bun:test";
 import { generateCodexConfig } from "./config-gen";
 
 test("generates valid TOML with dangerFullAccess and on-request", () => {

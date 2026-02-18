@@ -1,5 +1,5 @@
 // src/codex/rpc-client.test.ts
-import { describe, test, expect, afterEach } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import { createRpcClient } from "./rpc-client";
 
 let server: ReturnType<typeof Bun.serve> | null = null;
@@ -9,7 +9,9 @@ afterEach(() => {
 	server = null;
 });
 
-function startMockServer(handler: (ws: { send: (msg: string) => void }, message: string) => void): number {
+function startMockServer(
+	handler: (ws: { send: (msg: string) => void }, message: string) => void,
+): number {
 	const port = 30000 + Math.floor(Math.random() * 10000);
 	server = Bun.serve({
 		port,
@@ -29,11 +31,13 @@ function startMockServer(handler: (ws: { send: (msg: string) => void }, message:
 test("sends JSON-RPC request and receives response", async () => {
 	const port = startMockServer((ws, msg) => {
 		const req = JSON.parse(msg) as { id: number };
-		ws.send(JSON.stringify({
-			jsonrpc: "2.0",
-			id: req.id,
-			result: { threadId: "thread-1" },
-		}));
+		ws.send(
+			JSON.stringify({
+				jsonrpc: "2.0",
+				id: req.id,
+				result: { threadId: "thread-1" },
+			}),
+		);
 	});
 
 	const client = await createRpcClient(`ws://127.0.0.1:${port}`);
@@ -48,11 +52,13 @@ test("receives notifications via onNotification", async () => {
 		// Send response
 		ws.send(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: {} }));
 		// Then send notification
-		ws.send(JSON.stringify({
-			jsonrpc: "2.0",
-			method: "item/started",
-			params: { itemId: "item-1" },
-		}));
+		ws.send(
+			JSON.stringify({
+				jsonrpc: "2.0",
+				method: "item/started",
+				params: { itemId: "item-1" },
+			}),
+		);
 	});
 
 	const notifications: Array<{ method: string; params: unknown }> = [];
@@ -71,11 +77,13 @@ test("receives notifications via onNotification", async () => {
 test("rejects on JSON-RPC error response", async () => {
 	const port = startMockServer((ws, msg) => {
 		const req = JSON.parse(msg) as { id: number };
-		ws.send(JSON.stringify({
-			jsonrpc: "2.0",
-			id: req.id,
-			error: { code: -32600, message: "Invalid request" },
-		}));
+		ws.send(
+			JSON.stringify({
+				jsonrpc: "2.0",
+				id: req.id,
+				error: { code: -32600, message: "Invalid request" },
+			}),
+		);
 	});
 
 	const client = await createRpcClient(`ws://127.0.0.1:${port}`);

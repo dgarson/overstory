@@ -2,10 +2,17 @@
 // Per-worker bridge adapter process. Mediates between overstory and the shared
 // Codex App Server via JSON-RPC 2.0 over WebSocket. Run via Bun.spawn from sling.ts.
 import { join } from "node:path";
+import { createEventStore } from "../events/store";
+import { createMailClient } from "../mail/client";
+import { createMailStore } from "../mail/store";
+import type { EventStore } from "../types";
+import type { ApprovalContext } from "./approval";
+import { evaluateCommandApproval, evaluateFileChangeApproval } from "./approval";
+import { createDeltaBufferManager, normalizeItemCompleted, normalizeItemStarted } from "./events";
+import { createRpcClient } from "./rpc-client";
 import type {
 	ApprovalRequest,
 	BridgeConfig,
-	CodexItemType,
 	ItemCompletedParams,
 	ItemStartedParams,
 	OutputDeltaParams,
@@ -14,19 +21,9 @@ import type {
 	TurnCompletedParams,
 	TurnSteerParams,
 } from "./types";
-import { createRpcClient } from "./rpc-client";
-import type { ApprovalContext } from "./approval";
-import { evaluateCommandApproval, evaluateFileChangeApproval } from "./approval";
-import { createDeltaBufferManager, normalizeItemCompleted, normalizeItemStarted } from "./events";
-import { createEventStore } from "../events/store";
-import { createMailStore } from "../mail/store";
-import { createMailClient } from "../mail/client";
-import type { EventStore } from "../types";
 
 /** Parse bridge config from environment variables */
-export function parseBridgeConfig(
-	env: Record<string, string | undefined>,
-): BridgeConfig {
+export function parseBridgeConfig(env: Record<string, string | undefined>): BridgeConfig {
 	return {
 		agentName: env.OVERSTORY_AGENT_NAME ?? "",
 		worktreePath: env.OVERSTORY_WORKTREE_PATH ?? "",
@@ -53,10 +50,7 @@ export function shouldShutdown(status: string): boolean {
 }
 
 /** Safely insert an event into the event store (fire-and-forget) */
-function tryInsertEvent(
-	eventStore: EventStore,
-	event: Parameters<EventStore["insert"]>[0],
-): void {
+function tryInsertEvent(eventStore: EventStore, event: Parameters<EventStore["insert"]>[0]): void {
 	try {
 		eventStore.insert(event);
 	} catch {
@@ -288,11 +282,11 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 				input: `New messages:\n${summary}`,
 			};
 
-			rpc.request("turn/steer", steerParams as unknown as Record<string, unknown>).catch(
-				(err: unknown) => {
+			rpc
+				.request("turn/steer", steerParams as unknown as Record<string, unknown>)
+				.catch((err: unknown) => {
 					console.error("[bridge] turn/steer failed:", err);
-				},
-			);
+				});
 		} catch (err) {
 			console.error("[bridge] SIGUSR1 handler error:", err);
 		}

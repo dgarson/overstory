@@ -2,10 +2,7 @@
 import type { CodexItemType, DeltaBuffer } from "./types";
 
 /** Map Codex item types to overstory canonical tool names */
-export function normalizeToolName(
-	itemType: CodexItemType,
-	fileChangeKind?: string,
-): string {
+export function normalizeToolName(itemType: CodexItemType, fileChangeKind?: string): string {
 	switch (itemType) {
 		case "commandExecution":
 			return "Bash";

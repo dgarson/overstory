@@ -1,18 +1,6 @@
 // src/codex/types.test.ts
 // Type-level compilation tests — these just need to compile with `bun run typecheck`.
-import type {
-	JsonRpcRequest,
-	JsonRpcResponse,
-	JsonRpcNotification,
-	ThreadStartParams,
-	TurnStartParams,
-	TurnSteerParams,
-	ApprovalRequest,
-	ApprovalResponse,
-	DeltaBuffer,
-	BridgeConfig,
-	CodexItemType,
-} from "./types";
+import type { DeltaBuffer, JsonRpcNotification, JsonRpcRequest, ThreadStartParams } from "./types";
 
 // Type-level tests — these just need to compile
 const _req: JsonRpcRequest = {

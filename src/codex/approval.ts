@@ -1,10 +1,10 @@
 // src/codex/approval.ts
 import {
-	NON_IMPLEMENTATION_CAPABILITIES,
 	COORDINATION_CAPABILITIES,
 	COORDINATION_SAFE_PREFIXES,
-	SAFE_BASH_PREFIXES,
 	DANGEROUS_BASH_PATTERNS,
+	NON_IMPLEMENTATION_CAPABILITIES,
+	SAFE_BASH_PREFIXES,
 } from "../agents/hooks-deployer";
 import type { FileChange } from "./types";
 
@@ -35,10 +35,7 @@ const SCOUT_WRITE_PREFIXES = ["overstory spec write"];
  * 4. Dangerous bash patterns — decline
  * 5. Unknown — escalate to parent
  */
-export function evaluateCommandApproval(
-	command: string,
-	ctx: ApprovalContext,
-): ApprovalResult {
+export function evaluateCommandApproval(command: string, ctx: ApprovalContext): ApprovalResult {
 	const trimmed = command.trim();
 
 	// 1. Build the effective safe-prefix list for this capability
