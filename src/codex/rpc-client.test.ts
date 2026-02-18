@@ -14,7 +14,7 @@ function startMockServer(handler: (ws: { send: (msg: string) => void }, message:
 	server = Bun.serve({
 		port,
 		fetch(req, srv) {
-			if (srv.upgrade(req)) return undefined;
+			if (srv.upgrade(req, { data: undefined })) return undefined;
 			return new Response("Not found", { status: 404 });
 		},
 		websocket: {
