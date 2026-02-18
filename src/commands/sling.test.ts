@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { HierarchyError } from "../errors.ts";
+import type { AgentRuntime } from "../types.ts";
 import {
 	type BeaconOptions,
 	buildBeacon,
 	calculateStaggerDelay,
 	parentHasScouts,
+	resolveRuntime,
 	validateHierarchy,
 } from "./sling.ts";
 
@@ -429,5 +431,47 @@ describe("buildBeacon", () => {
 		expect(beacon).toContain("[OVERSTORY] worker-3 (builder)");
 		expect(beacon).toContain("task:overstory-deep");
 		expect(beacon).toContain("Depth: 2 | Parent: lead-main");
+	});
+});
+
+/**
+ * Tests for resolveRuntime — the priority chain for the --runtime flag.
+ *
+ * Priority order:
+ *   1. Explicit --runtime flag value
+ *   2. Per-capability default from config.codex.defaultRuntime
+ *   3. Hard default: "claude"
+ */
+
+describe("resolveRuntime", () => {
+	test("returns 'claude' when both flag and config default are undefined", () => {
+		expect(resolveRuntime(undefined, undefined)).toBe("claude");
+	});
+
+	test("returns 'codex' when flag is 'codex' and config default is undefined", () => {
+		const result = resolveRuntime("codex" as AgentRuntime, undefined);
+		expect(result).toBe("codex");
+	});
+
+	test("returns 'claude' when flag is 'claude' and config default is 'codex'", () => {
+		// Explicit flag always wins over config default
+		const result = resolveRuntime("claude" as AgentRuntime, "codex" as AgentRuntime);
+		expect(result).toBe("claude");
+	});
+
+	test("returns config default when flag is undefined and default is 'codex'", () => {
+		const result = resolveRuntime(undefined, "codex" as AgentRuntime);
+		expect(result).toBe("codex");
+	});
+
+	test("returns config default when flag is undefined and default is 'claude'", () => {
+		const result = resolveRuntime(undefined, "claude" as AgentRuntime);
+		expect(result).toBe("claude");
+	});
+
+	test("flag takes priority over config default", () => {
+		// Both provided: flag wins
+		const result = resolveRuntime("codex" as AgentRuntime, "claude" as AgentRuntime);
+		expect(result).toBe("codex");
 	});
 });

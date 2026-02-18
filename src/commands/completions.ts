@@ -74,6 +74,12 @@ export const COMMANDS: readonly CommandDef[] = [
 			{ name: "--parent", desc: "Parent agent name", takesValue: true },
 			{ name: "--depth", desc: "Current hierarchy depth", takesValue: true },
 			{ name: "--force-hierarchy", desc: "Bypass hierarchy validation" },
+			{
+				name: "--runtime",
+				desc: "Execution runtime (claude or codex)",
+				takesValue: true,
+				values: ["claude", "codex"],
+			},
 			{ name: "--json", desc: "JSON output" },
 			{ name: "--help", desc: "Show help" },
 		],
@@ -601,9 +607,21 @@ export const COMMANDS: readonly CommandDef[] = [
 			{ name: "--help", desc: "Show help" },
 		],
 		subcommands: [
-			{ name: "start", desc: "Start the Codex App Server", flags: [{ name: "--json", desc: "JSON output" }] },
-			{ name: "stop", desc: "Stop the Codex App Server", flags: [{ name: "--json", desc: "JSON output" }] },
-			{ name: "status", desc: "Show Codex App Server status", flags: [{ name: "--json", desc: "JSON output" }] },
+			{
+				name: "start",
+				desc: "Start the Codex App Server",
+				flags: [{ name: "--json", desc: "JSON output" }],
+			},
+			{
+				name: "stop",
+				desc: "Stop the Codex App Server",
+				flags: [{ name: "--json", desc: "JSON output" }],
+			},
+			{
+				name: "status",
+				desc: "Show Codex App Server status",
+				flags: [{ name: "--json", desc: "JSON output" }],
+			},
 		],
 	},
 ] as const;
