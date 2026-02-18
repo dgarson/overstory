@@ -593,6 +593,19 @@ export const COMMANDS: readonly CommandDef[] = [
 			},
 		],
 	},
+	{
+		name: "codex",
+		desc: "Manage Codex App Server",
+		flags: [
+			{ name: "--json", desc: "JSON output" },
+			{ name: "--help", desc: "Show help" },
+		],
+		subcommands: [
+			{ name: "start", desc: "Start the Codex App Server", flags: [{ name: "--json", desc: "JSON output" }] },
+			{ name: "stop", desc: "Stop the Codex App Server", flags: [{ name: "--json", desc: "JSON output" }] },
+			{ name: "status", desc: "Show Codex App Server status", flags: [{ name: "--json", desc: "JSON output" }] },
+		],
+	},
 ] as const;
 
 export function generateBash(): string {
