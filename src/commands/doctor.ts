@@ -7,6 +7,7 @@
 import { join } from "node:path";
 import { loadConfig } from "../config.ts";
 import { checkAgents } from "../doctor/agents.ts";
+import { checkCodex } from "../doctor/codex.ts";
 import { checkConfig } from "../doctor/config-check.ts";
 import { checkConsistency } from "../doctor/consistency.ts";
 import { checkDatabases } from "../doctor/databases.ts";
@@ -30,6 +31,7 @@ const ALL_CHECKS: Array<{ category: DoctorCategory; fn: DoctorCheckFn }> = [
 	{ category: "merge", fn: checkMergeQueue },
 	{ category: "logs", fn: checkLogs },
 	{ category: "version", fn: checkVersion },
+	{ category: "codex", fn: checkCodex },
 ];
 
 function hasFlag(args: string[], flag: string): boolean {
@@ -143,7 +145,7 @@ Options:
   --category <name>      Run only one category
   --help, -h             Show this help
 
-Categories: dependencies, structure, config, databases, consistency, agents, merge, logs, version`;
+Categories: dependencies, structure, config, databases, consistency, agents, merge, logs, version, codex`;
 
 /** Options for dependency injection in doctorCommand. */
 export interface DoctorCommandOptions {
