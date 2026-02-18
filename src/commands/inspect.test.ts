@@ -152,6 +152,7 @@ describe("inspectCommand", () => {
 				lastActivity: new Date().toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
+				runtime: "claude",
 			});
 			store.close();
 
@@ -184,6 +185,7 @@ describe("inspectCommand", () => {
 				lastActivity: new Date().toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
+				runtime: "claude",
 			});
 			store.close();
 
@@ -220,6 +222,7 @@ describe("inspectCommand", () => {
 				lastActivity: new Date(Date.now() - 5_000).toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
+				runtime: "claude",
 			});
 			store.close();
 
@@ -256,6 +259,7 @@ describe("inspectCommand", () => {
 				lastActivity: new Date().toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
+				runtime: "claude",
 			});
 			store.close();
 
@@ -295,6 +299,7 @@ describe("inspectCommand", () => {
 				lastActivity: new Date().toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
+				runtime: "claude",
 			});
 			store.close();
 
@@ -330,6 +335,7 @@ describe("inspectCommand", () => {
 				lastActivity: new Date().toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
+				runtime: "claude",
 			});
 			store.close();
 
@@ -365,6 +371,7 @@ describe("inspectCommand", () => {
 				lastActivity: new Date().toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
+				runtime: "claude",
 			});
 			store.close();
 
@@ -409,6 +416,7 @@ describe("inspectCommand", () => {
 				lastActivity: new Date().toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
+				runtime: "claude",
 			});
 			store.close();
 
@@ -452,6 +460,7 @@ describe("inspectCommand", () => {
 				lastActivity: new Date().toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
+				runtime: "claude",
 			});
 			store.close();
 
@@ -501,6 +510,7 @@ describe("inspectCommand", () => {
 				lastActivity: new Date().toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
+				runtime: "claude",
 			});
 			store.close();
 
@@ -538,6 +548,7 @@ describe("inspectCommand", () => {
 				lastActivity: new Date().toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
+				runtime: "claude",
 			});
 			store.close();
 
@@ -574,6 +585,7 @@ describe("inspectCommand", () => {
 				lastActivity: new Date().toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
+				runtime: "claude",
 			});
 			store.close();
 
@@ -611,6 +623,7 @@ describe("inspectCommand", () => {
 				lastActivity: new Date().toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
+				runtime: "claude",
 			});
 			store.close();
 
@@ -649,6 +662,7 @@ describe("inspectCommand", () => {
 				lastActivity: new Date().toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
+				runtime: "claude",
 			});
 			store.close();
 
