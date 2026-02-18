@@ -27,15 +27,14 @@ describe("evaluateCommandApproval", () => {
 		expect(result.decision).toBe("accept");
 	});
 
-	test("declines git push", () => {
+	test("escalates git push for builder (not in dangerous patterns for implementation agents)", () => {
 		const result = evaluateCommandApproval("git push origin main", builderCtx);
-		expect(result.decision).toBe("decline");
-		expect(result.reason).toContain("push");
+		expect(result.decision).toBe("escalate");
 	});
 
-	test("declines git reset --hard", () => {
+	test("escalates git reset --hard for builder (not in dangerous patterns for implementation agents)", () => {
 		const result = evaluateCommandApproval("git reset --hard HEAD~1", builderCtx);
-		expect(result.decision).toBe("decline");
+		expect(result.decision).toBe("escalate");
 	});
 
 	test("declines file-modifying bash for scout", () => {

@@ -1,6 +1,9 @@
 // src/codex/server.test.ts
-import { expect, test } from "bun:test";
-import { isServerAlive, parseServerState } from "./server";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { getServerStatePath, isServerAlive, parseServerState, readServerState } from "./server";
 
 test("parseServerState validates required fields", () => {
 	const valid = {
@@ -29,4 +32,69 @@ test("isServerAlive returns false for dead PID", () => {
 
 test("isServerAlive returns true for own process PID", () => {
 	expect(isServerAlive({ pid: process.pid, port: 21816, startedAt: "", url: "" })).toBe(true);
+});
+
+describe("getServerStatePath", () => {
+	test("returns correct path", () => {
+		const result = getServerStatePath("/fake/.overstory");
+		expect(result).toBe("/fake/.overstory/codex-server.json");
+	});
+});
+
+describe("readServerState", () => {
+	const tempDirs: string[] = [];
+
+	afterEach(async () => {
+		for (const dir of tempDirs) {
+			await rm(dir, { recursive: true, force: true });
+		}
+		tempDirs.length = 0;
+	});
+
+	async function makeTempDir(): Promise<string> {
+		const dir = await mkdtemp(join(tmpdir(), "server-test-"));
+		tempDirs.push(dir);
+		return dir;
+	}
+
+	test("reads existing valid state file", async () => {
+		const dir = await makeTempDir();
+		const stateData = {
+			pid: process.pid,
+			port: 9999,
+			startedAt: "2026-01-01T00:00:00Z",
+			url: "ws://127.0.0.1:9999",
+		};
+		await writeFile(join(dir, "codex-server.json"), JSON.stringify(stateData));
+
+		const result = await readServerState(dir);
+
+		expect(result).not.toBeNull();
+		expect(result?.pid).toBe(process.pid);
+		expect(result?.port).toBe(9999);
+		expect(result?.startedAt).toBe("2026-01-01T00:00:00Z");
+		expect(result?.url).toBe("ws://127.0.0.1:9999");
+	});
+
+	test("returns null when file is missing", async () => {
+		const dir = await makeTempDir();
+		const result = await readServerState(dir);
+		expect(result).toBeNull();
+	});
+
+	test("returns null for corrupted JSON", async () => {
+		const dir = await makeTempDir();
+		await writeFile(join(dir, "codex-server.json"), "not valid json {{{");
+
+		const result = await readServerState(dir);
+		expect(result).toBeNull();
+	});
+
+	test("returns null when required fields are missing", async () => {
+		const dir = await makeTempDir();
+		await writeFile(join(dir, "codex-server.json"), JSON.stringify({ pid: 123 }));
+
+		const result = await readServerState(dir);
+		expect(result).toBeNull();
+	});
 });
