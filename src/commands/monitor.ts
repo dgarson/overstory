@@ -161,6 +161,7 @@ async function startMonitor(args: string[]): Promise<void> {
 			lastActivity: new Date().toISOString(),
 			escalationLevel: 0,
 			stalledSince: null,
+			runtime: "claude",
 		};
 
 		store.upsert(session);

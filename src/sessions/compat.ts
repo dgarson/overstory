@@ -11,7 +11,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentSession } from "../types.ts";
+import type { AgentRuntime, AgentSession } from "../types.ts";
 import { createSessionStore, type SessionStore } from "./store.ts";
 
 /**
@@ -36,6 +36,7 @@ function normalizeSession(raw: Record<string, unknown>): AgentSession {
 		lastActivity: raw.lastActivity as string,
 		escalationLevel: (raw.escalationLevel as number) ?? 0,
 		stalledSince: (raw.stalledSince as string | null) ?? null,
+		runtime: ((raw.runtime as AgentRuntime | undefined) ?? "claude"),
 	};
 }
 
