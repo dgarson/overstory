@@ -237,7 +237,8 @@ export function printStatus(data: StatusData): void {
 			const duration = formatDuration(endTime - new Date(agent.startedAt).getTime());
 			const tmuxAlive = data.tmuxSessions.some((s) => s.name === agent.tmuxSession);
 			const aliveMarker = tmuxAlive ? "●" : "○";
-			w(`   ${aliveMarker} ${agent.agentName} [${agent.capability}] `);
+			const runtimeTag = agent.runtime === "codex" ? "/codex" : "";
+		w(`   ${aliveMarker} ${agent.agentName} [${agent.capability}${runtimeTag}] `);
 			w(`${agent.state} | ${agent.beadId} | ${duration}\n`);
 
 			const detail = data.verboseDetails?.[agent.agentName];
