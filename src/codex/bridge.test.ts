@@ -1,6 +1,29 @@
 // src/codex/bridge.test.ts
-import { describe, expect, test } from "bun:test";
-import { parseBridgeConfig, shouldShutdown } from "./bridge";
+
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { saveCheckpoint } from "../agents/checkpoint";
+import { createIdentity } from "../agents/identity";
+import { createEventStore } from "../events/store";
+import { createMailClient } from "../mail/client";
+import { createMailStore } from "../mail/store";
+import { openSessionStore } from "../sessions/compat";
+import { createRunStore, createSessionStore } from "../sessions/store";
+import type { AgentIdentity } from "../types";
+import {
+	buildInitialPrompt,
+	matchesEscalationReply,
+	parseBridgeConfig,
+	performShutdownBookkeeping,
+	type ShutdownDeps,
+	shouldSaveCheckpoint,
+	shouldShutdown,
+} from "./bridge";
+import type { BridgeConfig } from "./types";
+
+// ---- Existing tests ----
 
 describe("parseBridgeConfig", () => {
 	test("parses all fields from env vars", () => {
@@ -89,5 +112,824 @@ describe("shouldShutdown", () => {
 		expect(shouldShutdown("running")).toBe(false);
 		expect(shouldShutdown("")).toBe(false);
 		expect(shouldShutdown("unknown")).toBe(false);
+	});
+});
+
+// ---- New extracted function tests ----
+
+/** Helper: build a minimal BridgeConfig for tests. */
+function makeTestConfig(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
+	return {
+		agentName: "test-builder",
+		worktreePath: "/tmp/test-worktree",
+		branchName: "overstory/test-builder/task-1",
+		beadId: "task-1",
+		capability: "builder",
+		parentAgent: "lead-1",
+		depth: 2,
+		runId: "run-1",
+		sessionId: "sess-1",
+		serverUrl: "ws://127.0.0.1:21816",
+		model: "o3",
+		compactionThreshold: 0.8,
+		maxDeltaBufferBytes: 1048576,
+		approvalTimeoutMs: 60000,
+		fileScope: ["src/foo.ts"],
+		projectRoot: "/tmp/test-project",
+		...overrides,
+	};
+}
+
+// ========================================
+// buildInitialPrompt
+// ========================================
+
+describe("buildInitialPrompt", () => {
+	let tempDir: string;
+
+	beforeEach(async () => {
+		tempDir = await mkdtemp(join(tmpdir(), "bridge-prompt-test-"));
+	});
+
+	afterEach(async () => {
+		await rm(tempDir, { recursive: true, force: true });
+	});
+
+	test("includes beacon header with agent name, capability, and beadId", async () => {
+		const config = makeTestConfig({ projectRoot: tempDir });
+		const overstoryDir = join(tempDir, ".overstory");
+		const { mkdir } = await import("node:fs/promises");
+		await mkdir(overstoryDir, { recursive: true });
+
+		const prompt = await buildInitialPrompt(config, overstoryDir);
+
+		expect(prompt).toContain("[OVERSTORY] test-builder (builder)");
+		expect(prompt).toContain("task:task-1");
+		expect(prompt).toContain("Depth: 2 | Parent: lead-1");
+	});
+
+	test("includes beacon header with 'none' when no parent", async () => {
+		const config = makeTestConfig({ parentAgent: null, projectRoot: tempDir });
+		const overstoryDir = join(tempDir, ".overstory");
+		const { mkdir } = await import("node:fs/promises");
+		await mkdir(overstoryDir, { recursive: true });
+
+		const prompt = await buildInitialPrompt(config, overstoryDir);
+
+		expect(prompt).toContain("Parent: none");
+	});
+
+	test("includes identity section when identity.yaml exists", async () => {
+		const config = makeTestConfig({ projectRoot: tempDir });
+		const overstoryDir = join(tempDir, ".overstory");
+		const agentsDir = join(overstoryDir, "agents");
+
+		const identity: AgentIdentity = {
+			name: "test-builder",
+			capability: "builder",
+			created: new Date().toISOString(),
+			sessionsCompleted: 5,
+			expertiseDomains: [],
+			recentTasks: [],
+		};
+		await createIdentity(agentsDir, identity);
+
+		const prompt = await buildInitialPrompt(config, overstoryDir);
+
+		expect(prompt).toContain("Identity: 5 prior sessions");
+	});
+
+	test("omits identity section when no identity file", async () => {
+		const config = makeTestConfig({ projectRoot: tempDir });
+		const overstoryDir = join(tempDir, ".overstory");
+		const { mkdir } = await import("node:fs/promises");
+		await mkdir(overstoryDir, { recursive: true });
+
+		const prompt = await buildInitialPrompt(config, overstoryDir);
+
+		expect(prompt).not.toContain("Identity:");
+	});
+
+	test("includes checkpoint recovery section when checkpoint exists", async () => {
+		const config = makeTestConfig({ projectRoot: tempDir });
+		const overstoryDir = join(tempDir, ".overstory");
+		const agentsDir = join(overstoryDir, "agents");
+
+		await saveCheckpoint(agentsDir, {
+			agentName: "test-builder",
+			beadId: "task-1",
+			sessionId: "sess-old",
+			timestamp: new Date().toISOString(),
+			progressSummary: "Implemented half the feature",
+			filesModified: ["src/foo.ts", "src/bar.ts"],
+			currentBranch: "overstory/test-builder/task-1",
+			pendingWork: "Finish tests",
+			mulchDomains: [],
+		});
+
+		const prompt = await buildInitialPrompt(config, overstoryDir);
+
+		expect(prompt).toContain("## Session Recovery");
+		expect(prompt).toContain("Implemented half the feature");
+		expect(prompt).toContain("src/foo.ts, src/bar.ts");
+		expect(prompt).toContain("Finish tests");
+	});
+
+	test("omits recovery section when no checkpoint", async () => {
+		const config = makeTestConfig({ projectRoot: tempDir });
+		const overstoryDir = join(tempDir, ".overstory");
+		const { mkdir } = await import("node:fs/promises");
+		await mkdir(overstoryDir, { recursive: true });
+
+		const prompt = await buildInitialPrompt(config, overstoryDir);
+
+		expect(prompt).not.toContain("Session Recovery");
+	});
+
+	test("includes pending mail section when messages exist", async () => {
+		const config = makeTestConfig({ projectRoot: tempDir });
+		const overstoryDir = join(tempDir, ".overstory");
+		const { mkdir } = await import("node:fs/promises");
+		await mkdir(overstoryDir, { recursive: true });
+
+		// Insert a message addressed to our agent
+		const mailStore = createMailStore(join(overstoryDir, "mail.db"));
+		const mailClient = createMailClient(mailStore);
+		mailClient.send({
+			from: "lead-1",
+			to: "test-builder",
+			subject: "Instructions",
+			body: "Please build the feature now",
+			type: "status",
+			priority: "normal",
+		});
+		// Do NOT check (mark as read) — the messages should be found as unread
+		mailClient.close();
+
+		const prompt = await buildInitialPrompt(config, overstoryDir);
+
+		expect(prompt).toContain("## Pending Messages");
+		expect(prompt).toContain("[lead-1] Instructions");
+		expect(prompt).toContain("Please build the feature now");
+	});
+
+	test("omits mail section when no pending messages", async () => {
+		const config = makeTestConfig({ projectRoot: tempDir });
+		const overstoryDir = join(tempDir, ".overstory");
+		const { mkdir } = await import("node:fs/promises");
+		await mkdir(overstoryDir, { recursive: true });
+
+		const prompt = await buildInitialPrompt(config, overstoryDir);
+
+		expect(prompt).not.toContain("Pending Messages");
+	});
+
+	test("always includes activation section", async () => {
+		const config = makeTestConfig({ projectRoot: tempDir });
+		const overstoryDir = join(tempDir, ".overstory");
+		const { mkdir } = await import("node:fs/promises");
+		await mkdir(overstoryDir, { recursive: true });
+
+		const prompt = await buildInitialPrompt(config, overstoryDir);
+
+		expect(prompt).toContain("You have a bound task: **task-1**");
+		expect(prompt).toContain("Read your AGENTS.md overlay");
+		expect(prompt).toContain("Do not wait for dispatch mail");
+	});
+
+	test("gracefully degrades when all optional sections are missing", async () => {
+		const config = makeTestConfig({ parentAgent: null, projectRoot: tempDir });
+		const overstoryDir = join(tempDir, ".overstory");
+		const { mkdir } = await import("node:fs/promises");
+		await mkdir(overstoryDir, { recursive: true });
+
+		const prompt = await buildInitialPrompt(config, overstoryDir);
+
+		// Should not crash, should contain at least the beacon and activation
+		expect(prompt).toContain("[OVERSTORY]");
+		expect(prompt).toContain("You have a bound task:");
+		expect(prompt).not.toContain("Identity:");
+		expect(prompt).not.toContain("Session Recovery");
+		expect(prompt).not.toContain("Pending Messages");
+	});
+});
+
+// ========================================
+// matchesEscalationReply
+// ========================================
+
+describe("matchesEscalationReply", () => {
+	const marker = "[item-abc]";
+	const parent = "lead-1";
+
+	test("returns null when sender is not parent", () => {
+		const result = matchesEscalationReply(
+			{ from: "other-agent", subject: "Approved", type: "result" },
+			marker,
+			parent,
+		);
+		expect(result).toBeNull();
+	});
+
+	test("returns 'approve' when subject contains 'approve'", () => {
+		const result = matchesEscalationReply(
+			{ from: parent, subject: "I approve this command", type: "status" },
+			marker,
+			parent,
+		);
+		expect(result).toBe("approve");
+	});
+
+	test("returns 'approve' when subject contains 'accept'", () => {
+		const result = matchesEscalationReply(
+			{ from: parent, subject: "Accept the change", type: "status" },
+			marker,
+			parent,
+		);
+		expect(result).toBe("approve");
+	});
+
+	test("returns 'reject' when subject contains 'decline'", () => {
+		const result = matchesEscalationReply(
+			{ from: parent, subject: "I decline this", type: "status" },
+			marker,
+			parent,
+		);
+		expect(result).toBe("reject");
+	});
+
+	test("returns 'reject' when subject contains 'reject'", () => {
+		const result = matchesEscalationReply(
+			{ from: parent, subject: "Reject that command", type: "result" },
+			marker,
+			parent,
+		);
+		expect(result).toBe("reject");
+	});
+
+	test("is case-insensitive for keywords", () => {
+		expect(
+			matchesEscalationReply({ from: parent, subject: "APPROVED", type: "status" }, marker, parent),
+		).toBe("approve");
+
+		expect(
+			matchesEscalationReply({ from: parent, subject: "REJECTED", type: "status" }, marker, parent),
+		).toBe("reject");
+	});
+
+	test("returns 'approve' when marker correlates with result type", () => {
+		const result = matchesEscalationReply(
+			{ from: parent, subject: `Re: ${marker} something`, type: "result" },
+			marker,
+			parent,
+		);
+		expect(result).toBe("approve");
+	});
+
+	test("returns 'approve' when marker correlates with status type", () => {
+		const result = matchesEscalationReply(
+			{ from: parent, subject: `${marker} ok`, type: "status" },
+			marker,
+			parent,
+		);
+		expect(result).toBe("approve");
+	});
+
+	test("returns 'reject' when marker correlates with error type", () => {
+		const result = matchesEscalationReply(
+			{ from: parent, subject: `${marker} failed`, type: "error" },
+			marker,
+			parent,
+		);
+		expect(result).toBe("reject");
+	});
+
+	test("returns null when marker present but type is unrecognized", () => {
+		const result = matchesEscalationReply(
+			{ from: parent, subject: `${marker} something`, type: "question" },
+			marker,
+			parent,
+		);
+		expect(result).toBeNull();
+	});
+
+	test("returns null for unrelated message from parent", () => {
+		const result = matchesEscalationReply(
+			{ from: parent, subject: "Status update on other thing", type: "status" },
+			marker,
+			parent,
+		);
+		expect(result).toBeNull();
+	});
+
+	test("returns null when type is undefined and no keyword match", () => {
+		const result = matchesEscalationReply(
+			{ from: parent, subject: `${marker} response` },
+			marker,
+			parent,
+		);
+		expect(result).toBeNull();
+	});
+
+	test("keyword takes precedence over marker-based matching", () => {
+		// Subject contains both "approve" keyword AND marker with error type.
+		// Keywords are checked first, so "approve" wins.
+		const result = matchesEscalationReply(
+			{ from: parent, subject: `${marker} approve`, type: "error" },
+			marker,
+			parent,
+		);
+		expect(result).toBe("approve");
+	});
+});
+
+// ========================================
+// shouldSaveCheckpoint
+// ========================================
+
+describe("shouldSaveCheckpoint", () => {
+	const threshold = 0.8;
+	const debounceMs = 30_000;
+
+	test("returns false when below threshold", () => {
+		// 70% usage, well below 80% threshold
+		expect(shouldSaveCheckpoint(7000, 10000, threshold, 0, debounceMs, 100_000)).toBe(false);
+	});
+
+	test("returns true at threshold with past debounce", () => {
+		// Exactly at 80% threshold, debounce long expired
+		expect(shouldSaveCheckpoint(8000, 10000, threshold, 0, debounceMs, 100_000)).toBe(true);
+	});
+
+	test("returns true above threshold with past debounce", () => {
+		// 90% usage
+		expect(shouldSaveCheckpoint(9000, 10000, threshold, 0, debounceMs, 100_000)).toBe(true);
+	});
+
+	test("returns false at threshold within debounce window", () => {
+		// At threshold but last save was only 10 seconds ago (debounce is 30s)
+		const lastSave = 90_000;
+		const now = 100_000;
+		expect(shouldSaveCheckpoint(8000, 10000, threshold, lastSave, debounceMs, now)).toBe(false);
+	});
+
+	test("returns false when contextWindowSize is zero", () => {
+		// Avoids division by zero
+		expect(shouldSaveCheckpoint(8000, 0, threshold, 0, debounceMs, 100_000)).toBe(false);
+	});
+
+	test("returns false when contextWindowSize is negative", () => {
+		expect(shouldSaveCheckpoint(8000, -1, threshold, 0, debounceMs, 100_000)).toBe(false);
+	});
+
+	test("returns true at exactly 100% usage", () => {
+		expect(shouldSaveCheckpoint(10000, 10000, threshold, 0, debounceMs, 100_000)).toBe(true);
+	});
+
+	test("returns true above 100% usage", () => {
+		// Token count can exceed context window in some edge cases
+		expect(shouldSaveCheckpoint(12000, 10000, threshold, 0, debounceMs, 100_000)).toBe(true);
+	});
+
+	test("handles various ratio values near threshold", () => {
+		// 0.79 -> below 0.8 threshold
+		expect(shouldSaveCheckpoint(79, 100, threshold, 0, debounceMs, 100_000)).toBe(false);
+		// 0.80 -> at threshold
+		expect(shouldSaveCheckpoint(80, 100, threshold, 0, debounceMs, 100_000)).toBe(true);
+		// 0.81 -> above threshold
+		expect(shouldSaveCheckpoint(81, 100, threshold, 0, debounceMs, 100_000)).toBe(true);
+	});
+
+	test("respects custom threshold of 0.7", () => {
+		// 70% with 0.7 threshold -> at threshold
+		expect(shouldSaveCheckpoint(7000, 10000, 0.7, 0, debounceMs, 100_000)).toBe(true);
+		// 69% with 0.7 threshold -> below
+		expect(shouldSaveCheckpoint(6900, 10000, 0.7, 0, debounceMs, 100_000)).toBe(false);
+	});
+
+	test("uses Date.now() when nowMs is not provided", () => {
+		// With lastSaveMs of 0, the debounce should be expired since Date.now() >> 30000
+		expect(shouldSaveCheckpoint(8000, 10000, threshold, 0, debounceMs)).toBe(true);
+	});
+
+	test("returns true when debounce exactly expired", () => {
+		const lastSave = 70_000;
+		const now = 100_000; // 30_000ms after lastSave, exactly at debounce boundary
+		expect(shouldSaveCheckpoint(8000, 10000, threshold, lastSave, debounceMs, now)).toBe(true);
+	});
+});
+
+// ========================================
+// performShutdownBookkeeping
+// ========================================
+
+describe("performShutdownBookkeeping", () => {
+	let tempDir: string;
+
+	beforeEach(async () => {
+		tempDir = await mkdtemp(join(tmpdir(), "bridge-shutdown-test-"));
+	});
+
+	afterEach(async () => {
+		await rm(tempDir, { recursive: true, force: true });
+	});
+
+	/** Helper: set up a real .overstory dir with needed subdirectories */
+	async function setupOverstoryDir(): Promise<string> {
+		const overstoryDir = join(tempDir, ".overstory");
+		const { mkdir } = await import("node:fs/promises");
+		await mkdir(join(overstoryDir, "agents", "test-builder"), { recursive: true });
+		return overstoryDir;
+	}
+
+	/** Helper: create a real identity file for the agent */
+	async function createTestIdentity(overstoryDir: string): Promise<void> {
+		const agentsDir = join(overstoryDir, "agents");
+		await createIdentity(agentsDir, {
+			name: "test-builder",
+			capability: "builder",
+			created: new Date().toISOString(),
+			sessionsCompleted: 3,
+			expertiseDomains: [],
+			recentTasks: [],
+		});
+	}
+
+	/** Helper: create a session record in the SessionStore */
+	function createTestSession(overstoryDir: string): void {
+		const store = createSessionStore(join(overstoryDir, "sessions.db"));
+		store.upsert({
+			id: "sess-1",
+			agentName: "test-builder",
+			capability: "builder",
+			worktreePath: "/tmp/test-worktree",
+			branchName: "overstory/test-builder/task-1",
+			beadId: "task-1",
+			tmuxSession: "overstory-test-fake",
+			state: "working",
+			pid: null,
+			parentAgent: "lead-1",
+			depth: 2,
+			runId: "run-1",
+			startedAt: new Date().toISOString(),
+			lastActivity: new Date().toISOString(),
+			escalationLevel: 0,
+			stalledSince: null,
+			runtime: "codex",
+		});
+		store.close();
+	}
+
+	/** Helper: build ShutdownDeps using real SQLite stores at a temp path */
+	async function makeRealDeps(
+		overstoryDir: string,
+		overrides: Partial<ShutdownDeps> = {},
+	): Promise<ShutdownDeps> {
+		const { updateIdentity: realUpdateIdentity } = await import("../agents/identity");
+		const eventStore = createEventStore(join(overstoryDir, "events.db"));
+		const mailStore = createMailStore(join(overstoryDir, "mail.db"));
+		const mailClient = createMailClient(mailStore);
+
+		return {
+			eventStore,
+			mailClient,
+			openSessionStore,
+			updateIdentity: realUpdateIdentity,
+			createRunStore,
+			...overrides,
+		};
+	}
+
+	test("records session_end event in EventStore", async () => {
+		const overstoryDir = await setupOverstoryDir();
+		const config = makeTestConfig({ projectRoot: tempDir });
+		const deps = await makeRealDeps(overstoryDir);
+
+		await performShutdownBookkeeping(config, overstoryDir, deps);
+
+		const events = deps.eventStore.getByAgent("test-builder");
+		const sessionEnd = events.find((e) => e.eventType === "session_end");
+		expect(sessionEnd).toBeDefined();
+		expect(sessionEnd?.agentName).toBe("test-builder");
+		expect(sessionEnd?.level).toBe("info");
+		const data = JSON.parse(sessionEnd?.data ?? "{}") as Record<string, unknown>;
+		expect(data.reason).toBe("turn_completed");
+		expect(data.runtime).toBe("codex");
+
+		deps.eventStore.close();
+		deps.mailClient.close();
+	});
+
+	test("updates SessionStore state to completed", async () => {
+		const overstoryDir = await setupOverstoryDir();
+		createTestSession(overstoryDir);
+		const config = makeTestConfig({ projectRoot: tempDir });
+		const deps = await makeRealDeps(overstoryDir);
+
+		await performShutdownBookkeeping(config, overstoryDir, deps);
+
+		// Verify session state is now "completed"
+		const { store } = openSessionStore(overstoryDir);
+		const session = store.getByName("test-builder");
+		expect(session?.state).toBe("completed");
+		store.close();
+
+		deps.eventStore.close();
+		deps.mailClient.close();
+	});
+
+	test("increments identity.sessionsCompleted", async () => {
+		const overstoryDir = await setupOverstoryDir();
+		await createTestIdentity(overstoryDir);
+		const config = makeTestConfig({ projectRoot: tempDir });
+		const deps = await makeRealDeps(overstoryDir);
+
+		await performShutdownBookkeeping(config, overstoryDir, deps);
+
+		// Check identity was updated
+		const { loadIdentity } = await import("../agents/identity");
+		const identity = await loadIdentity(join(overstoryDir, "agents"), "test-builder");
+		expect(identity?.sessionsCompleted).toBe(4); // was 3, incremented by 1
+
+		deps.eventStore.close();
+		deps.mailClient.close();
+	});
+
+	test("sends worker_done mail to parent when parentAgent exists", async () => {
+		const overstoryDir = await setupOverstoryDir();
+		const config = makeTestConfig({ parentAgent: "lead-1", projectRoot: tempDir });
+		const deps = await makeRealDeps(overstoryDir);
+
+		await performShutdownBookkeeping(config, overstoryDir, deps);
+
+		// Check that a worker_done message was sent
+		const mailStore = createMailStore(join(overstoryDir, "mail.db"));
+		const messages = mailStore.getAll({ to: "lead-1" });
+		const workerDone = messages.find((m) => m.type === "worker_done");
+		expect(workerDone).toBeDefined();
+		expect(workerDone?.from).toBe("test-builder");
+		expect(workerDone?.subject).toContain("Worker done: task-1");
+		mailStore.close();
+
+		deps.eventStore.close();
+		deps.mailClient.close();
+	});
+
+	test("does NOT send worker_done mail when no parentAgent", async () => {
+		const overstoryDir = await setupOverstoryDir();
+		const config = makeTestConfig({ parentAgent: null, projectRoot: tempDir });
+		const deps = await makeRealDeps(overstoryDir);
+
+		await performShutdownBookkeeping(config, overstoryDir, deps);
+
+		// Check no messages exist
+		const mailStore = createMailStore(join(overstoryDir, "mail.db"));
+		const allMessages = mailStore.getAll();
+		expect(allMessages.length).toBe(0);
+		mailStore.close();
+
+		deps.eventStore.close();
+		deps.mailClient.close();
+	});
+
+	test("writes auto-nudge marker when capability is 'lead'", async () => {
+		const overstoryDir = await setupOverstoryDir();
+		const config = makeTestConfig({
+			capability: "lead",
+			agentName: "test-lead",
+			parentAgent: "coordinator",
+			projectRoot: tempDir,
+		});
+		const deps = await makeRealDeps(overstoryDir);
+
+		await performShutdownBookkeeping(config, overstoryDir, deps);
+
+		const markerPath = join(overstoryDir, "pending-nudges", "coordinator.json");
+		const markerFile = Bun.file(markerPath);
+		expect(await markerFile.exists()).toBe(true);
+		const marker = JSON.parse(await markerFile.text()) as Record<string, unknown>;
+		expect(marker.from).toBe("test-lead");
+		expect(marker.reason).toBe("lead_completed");
+
+		deps.eventStore.close();
+		deps.mailClient.close();
+	});
+
+	test("does NOT write nudge marker when capability is not 'lead'", async () => {
+		const overstoryDir = await setupOverstoryDir();
+		const config = makeTestConfig({ capability: "builder", projectRoot: tempDir });
+		const deps = await makeRealDeps(overstoryDir);
+
+		await performShutdownBookkeeping(config, overstoryDir, deps);
+
+		const markerPath = join(overstoryDir, "pending-nudges", "coordinator.json");
+		const markerFile = Bun.file(markerPath);
+		expect(await markerFile.exists()).toBe(false);
+
+		deps.eventStore.close();
+		deps.mailClient.close();
+	});
+
+	test("completes run when capability is 'coordinator' and current-run.txt exists", async () => {
+		const overstoryDir = await setupOverstoryDir();
+		const config = makeTestConfig({
+			capability: "coordinator",
+			agentName: "coordinator",
+			parentAgent: null,
+			projectRoot: tempDir,
+		});
+
+		// Create a run in the store and write current-run.txt
+		const runStore = createRunStore(join(overstoryDir, "sessions.db"));
+		runStore.createRun({
+			id: "run-test-1",
+			startedAt: new Date().toISOString(),
+			coordinatorSessionId: "sess-1",
+			status: "active",
+		});
+		runStore.close();
+		await Bun.write(join(overstoryDir, "current-run.txt"), "run-test-1\n");
+
+		const deps = await makeRealDeps(overstoryDir);
+
+		await performShutdownBookkeeping(config, overstoryDir, deps);
+
+		// Verify run was completed
+		const checkStore = createRunStore(join(overstoryDir, "sessions.db"));
+		const run = checkStore.getRun("run-test-1");
+		expect(run?.status).toBe("completed");
+		expect(run?.completedAt).not.toBeNull();
+		checkStore.close();
+
+		// current-run.txt should be deleted
+		const runFile = Bun.file(join(overstoryDir, "current-run.txt"));
+		expect(await runFile.exists()).toBe(false);
+
+		deps.eventStore.close();
+		deps.mailClient.close();
+	});
+
+	test("does NOT complete run when capability is not 'coordinator'", async () => {
+		const overstoryDir = await setupOverstoryDir();
+		const config = makeTestConfig({ capability: "builder", projectRoot: tempDir });
+
+		// Create a run and current-run.txt that should NOT be touched
+		const runStore = createRunStore(join(overstoryDir, "sessions.db"));
+		runStore.createRun({
+			id: "run-untouched",
+			startedAt: new Date().toISOString(),
+			coordinatorSessionId: "sess-1",
+			status: "active",
+		});
+		runStore.close();
+		await Bun.write(join(overstoryDir, "current-run.txt"), "run-untouched\n");
+
+		const deps = await makeRealDeps(overstoryDir);
+
+		await performShutdownBookkeeping(config, overstoryDir, deps);
+
+		// Run should still be active
+		const checkStore = createRunStore(join(overstoryDir, "sessions.db"));
+		const run = checkStore.getRun("run-untouched");
+		expect(run?.status).toBe("active");
+		checkStore.close();
+
+		deps.eventStore.close();
+		deps.mailClient.close();
+	});
+
+	test("each step is non-fatal: throwing eventStore does not prevent mail send", async () => {
+		const overstoryDir = await setupOverstoryDir();
+		const config = makeTestConfig({ parentAgent: "lead-1", projectRoot: tempDir });
+
+		// Create a real mail client but a throwing event store
+		const mailStore = createMailStore(join(overstoryDir, "mail.db"));
+		const mailClient = createMailClient(mailStore);
+		const { updateIdentity: realUpdateIdentity } = await import("../agents/identity");
+
+		const throwingEventStore = {
+			insert() {
+				throw new Error("Event store broken");
+			},
+			correlateToolEnd() {
+				return null;
+			},
+			getByAgent() {
+				return [];
+			},
+			getByRun() {
+				return [];
+			},
+			getErrors() {
+				return [];
+			},
+			getTimeline() {
+				return [];
+			},
+			getToolStats() {
+				return [];
+			},
+			purge() {
+				return 0;
+			},
+			close() {},
+		} satisfies import("../types").EventStore;
+
+		const deps: ShutdownDeps = {
+			eventStore: throwingEventStore,
+			mailClient,
+			openSessionStore,
+			updateIdentity: realUpdateIdentity,
+			createRunStore,
+		};
+
+		// Should NOT throw even though eventStore.insert throws
+		await performShutdownBookkeeping(config, overstoryDir, deps);
+
+		// Mail should still have been sent despite event store failure
+		const checkStore = createMailStore(join(overstoryDir, "mail.db"));
+		const messages = checkStore.getAll({ to: "lead-1" });
+		const workerDone = messages.find((m) => m.type === "worker_done");
+		expect(workerDone).toBeDefined();
+		checkStore.close();
+		mailClient.close();
+	});
+
+	test("each step is non-fatal: throwing openSessionStore does not block identity update", async () => {
+		const overstoryDir = await setupOverstoryDir();
+		await createTestIdentity(overstoryDir);
+		const config = makeTestConfig({ projectRoot: tempDir });
+		const { updateIdentity: realUpdateIdentity } = await import("../agents/identity");
+
+		const eventStore = createEventStore(join(overstoryDir, "events.db"));
+		const mailStore = createMailStore(join(overstoryDir, "mail.db"));
+		const mailClient = createMailClient(mailStore);
+
+		const throwingOpenSessionStore = () => {
+			throw new Error("Session store broken");
+		};
+
+		const deps: ShutdownDeps = {
+			eventStore,
+			mailClient,
+			openSessionStore: throwingOpenSessionStore as unknown as typeof openSessionStore,
+			updateIdentity: realUpdateIdentity,
+			createRunStore,
+		};
+
+		await performShutdownBookkeeping(config, overstoryDir, deps);
+
+		// Identity should still have been updated
+		const { loadIdentity } = await import("../agents/identity");
+		const identity = await loadIdentity(join(overstoryDir, "agents"), "test-builder");
+		expect(identity?.sessionsCompleted).toBe(4);
+
+		eventStore.close();
+		mailClient.close();
+	});
+
+	test("calls runMulchLearn when provided", async () => {
+		const overstoryDir = await setupOverstoryDir();
+		const config = makeTestConfig({ projectRoot: tempDir });
+
+		let mulchCalled = false;
+		let mulchCwd = "";
+		const deps = await makeRealDeps(overstoryDir, {
+			runMulchLearn: async (cwd: string) => {
+				mulchCalled = true;
+				mulchCwd = cwd;
+			},
+		});
+
+		await performShutdownBookkeeping(config, overstoryDir, deps);
+
+		expect(mulchCalled).toBe(true);
+		expect(mulchCwd).toBe("/tmp/test-worktree");
+
+		deps.eventStore.close();
+		deps.mailClient.close();
+	});
+
+	test("survives runMulchLearn throwing", async () => {
+		const overstoryDir = await setupOverstoryDir();
+		const config = makeTestConfig({ parentAgent: "lead-1", projectRoot: tempDir });
+
+		const deps = await makeRealDeps(overstoryDir, {
+			runMulchLearn: async () => {
+				throw new Error("mulch not installed");
+			},
+		});
+
+		// Should not throw
+		await performShutdownBookkeeping(config, overstoryDir, deps);
+
+		// Subsequent steps should still have run (mail sent)
+		const checkStore = createMailStore(join(overstoryDir, "mail.db"));
+		const messages = checkStore.getAll({ to: "lead-1" });
+		expect(messages.length).toBeGreaterThan(0);
+		checkStore.close();
+
+		deps.eventStore.close();
+		deps.mailClient.close();
 	});
 });

@@ -11,7 +11,7 @@ import { createMailClient } from "../mail/client";
 import { createMailStore } from "../mail/store";
 import { openSessionStore } from "../sessions/compat";
 import { createRunStore } from "../sessions/store";
-import type { EventLevel, EventStore, SessionCheckpoint } from "../types";
+import type { EventLevel, EventStore, MailMessage, SessionCheckpoint } from "../types";
 import type { ApprovalContext } from "./approval";
 import { evaluateCommandApproval, evaluateFileChangeApproval } from "./approval";
 import { createDeltaBufferManager, normalizeItemCompleted, normalizeItemStarted } from "./events";
@@ -54,6 +54,210 @@ export function shouldShutdown(status: string): boolean {
 	return status === "completed" || status === "failed" || status === "cancelled";
 }
 
+/**
+ * Determine if a mail message is an approval/rejection reply to an escalation.
+ * Pure function: extracts the reply-matching logic from handleApprovalRequest().
+ *
+ * Returns "approve" if the message grants approval, "reject" if it denies,
+ * or null if the message does not match the escalation at all.
+ */
+export function matchesEscalationReply(
+	msg: { from: string; subject: string; type?: string },
+	escalationMarker: string,
+	parentAgent: string,
+): "approve" | "reject" | null {
+	if (msg.from !== parentAgent) return null;
+
+	const subj = msg.subject.toLowerCase();
+
+	// Keyword-based approval/rejection (highest priority)
+	if (subj.includes("approve") || subj.includes("accept")) return "approve";
+	if (subj.includes("decline") || subj.includes("reject")) return "reject";
+
+	// Marker-based correlation with type matching
+	if (msg.subject.includes(escalationMarker)) {
+		if (msg.type === "result" || msg.type === "status") return "approve";
+		if (msg.type === "error") return "reject";
+	}
+
+	return null;
+}
+
+/**
+ * Determine whether a checkpoint should be saved based on token usage.
+ * Pure function: extracts the threshold + debounce logic from the
+ * thread/tokenUsage/updated notification handler.
+ */
+export function shouldSaveCheckpoint(
+	totalTokens: number,
+	contextWindowSize: number,
+	compactionThreshold: number,
+	lastSaveMs: number,
+	debounceMs: number,
+	nowMs?: number,
+): boolean {
+	if (contextWindowSize <= 0) return false;
+	const ratio = totalTokens / contextWindowSize;
+	const now = nowMs ?? Date.now();
+	return ratio >= compactionThreshold && now - lastSaveMs >= debounceMs;
+}
+
+/**
+ * Dependency injection interface for shutdown bookkeeping.
+ * Allows tests to supply real SQLite stores while faking subprocess calls.
+ */
+export interface ShutdownDeps {
+	eventStore: EventStore;
+	mailClient: {
+		send(msg: {
+			from: string;
+			to: string;
+			subject: string;
+			body: string;
+			type?: MailMessage["type"];
+			priority?: MailMessage["priority"];
+		}): void;
+		close(): void;
+	};
+	openSessionStore: (dir: string) => {
+		store: { updateState(agent: string, state: string): void; close(): void };
+	};
+	updateIdentity: typeof updateIdentity;
+	saveCheckpoint?: typeof saveCheckpoint;
+	runMulchLearn?: (cwd: string) => Promise<void>;
+	createRunStore: (path: string) => {
+		completeRun(id: string, status: string): void;
+		close(): void;
+	};
+}
+
+/**
+ * Perform shutdown bookkeeping after a bridge session ends.
+ * Extracted from the inline shutdown block in runBridge() for testability.
+ *
+ * Each step is wrapped in try/catch to ensure subsequent steps still run
+ * even if an earlier step fails (non-fatal bookkeeping pattern).
+ */
+export async function performShutdownBookkeeping(
+	config: BridgeConfig,
+	overstoryDir: string,
+	deps: ShutdownDeps,
+): Promise<void> {
+	// 1. Record session_end event
+	try {
+		deps.eventStore.insert({
+			runId: config.runId,
+			agentName: config.agentName,
+			sessionId: config.sessionId,
+			eventType: "session_end",
+			toolName: null,
+			toolArgs: null,
+			toolDurationMs: null,
+			level: "info",
+			data: JSON.stringify({ reason: "turn_completed", runtime: "codex" }),
+		});
+	} catch {
+		// Non-fatal: event recording failure shouldn't block shutdown
+	}
+
+	// 2. Update session state to "completed"
+	try {
+		const { store: sessionStore } = deps.openSessionStore(overstoryDir);
+		try {
+			sessionStore.updateState(config.agentName, "completed");
+		} finally {
+			sessionStore.close();
+		}
+	} catch {
+		// Non-fatal: session state update failure shouldn't block shutdown
+	}
+
+	// 3. Increment identity.sessionsCompleted
+	try {
+		const identityBaseDir = join(overstoryDir, "agents");
+		await deps.updateIdentity(identityBaseDir, config.agentName, {
+			sessionsCompleted: 1,
+			completedTask: {
+				beadId: config.beadId,
+				summary: `Codex ${config.capability} agent completed task ${config.beadId}`,
+			},
+		});
+	} catch {
+		// Non-fatal: identity update failure shouldn't block shutdown
+	}
+
+	// 4. Auto-record expertise (mirrors Stop hook's `mulch learn`)
+	if (deps.runMulchLearn) {
+		try {
+			await deps.runMulchLearn(config.worktreePath);
+		} catch {
+			// Non-fatal: mulch may not be installed or available
+		}
+	}
+
+	// 5. Send worker_done mail to parent
+	if (config.parentAgent) {
+		try {
+			deps.mailClient.send({
+				from: config.agentName,
+				to: config.parentAgent,
+				subject: `Worker done: ${config.beadId}`,
+				body: `Completed task ${config.beadId}. Quality gates: bridge shutdown.`,
+				type: "worker_done",
+				priority: "normal",
+			});
+		} catch {
+			// Non-fatal: mail send failure shouldn't block shutdown
+		}
+	}
+
+	// 6. Auto-nudge coordinator when a lead completes
+	if (config.capability === "lead") {
+		try {
+			const nudgesDir = join(overstoryDir, "pending-nudges");
+			await mkdir(nudgesDir, { recursive: true });
+			const markerPath = join(nudgesDir, "coordinator.json");
+			const marker = {
+				from: config.agentName,
+				reason: "lead_completed",
+				subject: `Lead ${config.agentName} completed — check mail for merge_ready/worker_done`,
+				messageId: `auto-nudge-${config.agentName}-${Date.now()}`,
+				createdAt: new Date().toISOString(),
+			};
+			await Bun.write(markerPath, `${JSON.stringify(marker, null, "\t")}\n`);
+		} catch {
+			// Non-fatal: nudge failure should not break session-end
+		}
+	}
+
+	// 7. Auto-complete run when coordinator exits
+	if (config.capability === "coordinator") {
+		try {
+			const currentRunPath = join(overstoryDir, "current-run.txt");
+			const currentRunFile = Bun.file(currentRunPath);
+			if (await currentRunFile.exists()) {
+				const runId = (await currentRunFile.text()).trim();
+				if (runId.length > 0) {
+					const runStore = deps.createRunStore(join(overstoryDir, "sessions.db"));
+					try {
+						runStore.completeRun(runId, "completed");
+					} finally {
+						runStore.close();
+					}
+					const { unlink: unlinkFile } = await import("node:fs/promises");
+					try {
+						await unlinkFile(currentRunPath);
+					} catch {
+						// File may already be gone
+					}
+				}
+			}
+		} catch {
+			// Non-fatal: run completion should not break session-end handling
+		}
+	}
+}
+
 /** Safely insert an event into the event store (fire-and-forget) */
 function tryInsertEvent(eventStore: EventStore, event: Parameters<EventStore["insert"]>[0]): void {
 	try {
@@ -74,7 +278,10 @@ const VALID_LEVELS: ReadonlySet<string> = new Set(["debug", "info", "warn", "err
  * - Pending mail (if any messages arrived before the first turn)
  * - Checkpoint recovery (if resuming after compaction/crash)
  */
-async function buildInitialPrompt(config: BridgeConfig, overstoryDir: string): Promise<string> {
+export async function buildInitialPrompt(
+	config: BridgeConfig,
+	overstoryDir: string,
+): Promise<string> {
 	const sections: string[] = [];
 	const timestamp = new Date().toISOString();
 	const parent = config.parentAgent ?? "none";
@@ -237,29 +444,19 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 				iterations++;
 				await Bun.sleep(2000);
 				const messages = mailClient.check(config.agentName);
-				const reply = messages.find((m) => {
-					if (m.from !== config.parentAgent) return false;
-					const subj = m.subject.toLowerCase();
-					// Check for correlated reply (contains itemId marker)
-					const isCorrelated = m.subject.includes(escalationMarker);
-					// Check by type: result or status from parent
-					const isApprovalType = m.type === "result" || m.type === "status";
-					// Check by keyword in subject
-					const hasApproveKeyword = subj.includes("approve") || subj.includes("accept");
-					return hasApproveKeyword || (isCorrelated && isApprovalType);
-				});
-				if (reply) {
-					parentApproved = true;
-					break;
+				let foundReject = false;
+				for (const m of messages) {
+					const result = matchesEscalationReply(m, escalationMarker, config.parentAgent ?? "");
+					if (result === "approve") {
+						parentApproved = true;
+						break;
+					}
+					if (result === "reject") {
+						foundReject = true;
+						break;
+					}
 				}
-				const rejection = messages.find((m) => {
-					if (m.from !== config.parentAgent) return false;
-					const subj = m.subject.toLowerCase();
-					const isCorrelated = m.subject.includes(escalationMarker);
-					const hasRejectKeyword = subj.includes("decline") || subj.includes("reject");
-					return hasRejectKeyword || (isCorrelated && m.type === "error");
-				});
-				if (rejection) {
+				if (parentApproved || foundReject) {
 					break;
 				}
 			}
@@ -363,8 +560,35 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 	rpc.onNotification((method: string, params: unknown) => {
 		const p = params as Record<string, unknown> | undefined;
 
+		// turn/completed — check if we should shut down.
+		// MUST be checked before item/completed's endsWith("/completed") wildcard,
+		// which would otherwise swallow turn/completed notifications.
+		if (method === "turn/completed") {
+			const turn = p as TurnCompletedParams | undefined;
+			if (!turn) return;
+
+			activeTurnId = null;
+
+			if (shouldShutdown(turn.status)) {
+				shutdownRequested = true;
+				shutdownResolve?.();
+			}
+		}
+
+		// turn/started — track the active turn ID and check for pending messages.
+		// MUST be checked before item/started's endsWith("/started") wildcard,
+		// which would otherwise swallow turn/started notifications.
+		else if (method === "turn/started") {
+			const turn = p as { threadId: string; turnId: string } | undefined;
+			if (turn) {
+				activeTurnId = turn.turnId;
+				// Check for messages that arrived between turns
+				debouncedMailCheck();
+			}
+		}
+
 		// item/started — record tool_start event
-		if (method === "item/started" || method.endsWith("/started")) {
+		else if (method === "item/started" || method.endsWith("/started")) {
 			const started = p as ItemStartedParams | undefined;
 			if (!started) return;
 			itemStartTimes.set(started.itemId, Date.now());
@@ -477,29 +701,6 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 				});
 		}
 
-		// turn/completed — check if we should shut down
-		else if (method === "turn/completed") {
-			const turn = p as TurnCompletedParams | undefined;
-			if (!turn) return;
-
-			activeTurnId = null;
-
-			if (shouldShutdown(turn.status)) {
-				shutdownRequested = true;
-				shutdownResolve?.();
-			}
-		}
-
-		// turn/started — track the active turn ID and check for pending messages
-		else if (method === "turn/started") {
-			const turn = p as { threadId: string; turnId: string } | undefined;
-			if (turn) {
-				activeTurnId = turn.turnId;
-				// Check for messages that arrived between turns
-				debouncedMailCheck();
-			}
-		}
-
 		// token usage updates — log + compaction threshold checkpoint save
 		else if (method === "thread/tokenUsage/updated" || method.endsWith("/tokenUsage")) {
 			const usage = p as TokenUsageParams | undefined;
@@ -513,33 +714,35 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 			// This pre-saves state so post-compaction recovery has data to inject.
 			// Debounced: saves every CHECKPOINT_DEBOUNCE_MS while above threshold
 			// so the checkpoint stays fresh as more work happens.
-			if (usage.contextWindowSize > 0) {
+			if (
+				shouldSaveCheckpoint(
+					usage.totalTokens,
+					usage.contextWindowSize,
+					config.compactionThreshold,
+					lastCheckpointSaveMs,
+					CHECKPOINT_DEBOUNCE_MS,
+				)
+			) {
+				lastCheckpointSaveMs = Date.now();
 				const ratio = usage.totalTokens / usage.contextWindowSize;
-				const now = Date.now();
-				if (
-					ratio >= config.compactionThreshold &&
-					now - lastCheckpointSaveMs >= CHECKPOINT_DEBOUNCE_MS
-				) {
-					lastCheckpointSaveMs = now;
-					const checkpoint: SessionCheckpoint = {
-						agentName: config.agentName,
-						beadId: config.beadId,
-						sessionId: config.sessionId,
-						timestamp: new Date().toISOString(),
-						progressSummary: lastProgressSummary || "In progress",
-						filesModified: Array.from(modifiedFiles),
-						currentBranch: config.branchName,
-						pendingWork: `Continue task ${config.beadId}`,
-						mulchDomains: [],
-					};
-					const identityBaseDir = join(overstoryDir, "agents");
-					saveCheckpoint(identityBaseDir, checkpoint).catch((err: unknown) => {
-						console.error("[bridge] checkpoint save failed:", err);
-					});
-					console.log(
-						`[bridge] checkpoint saved (ratio=${ratio.toFixed(2)}, threshold=${config.compactionThreshold})`,
-					);
-				}
+				const checkpoint: SessionCheckpoint = {
+					agentName: config.agentName,
+					beadId: config.beadId,
+					sessionId: config.sessionId,
+					timestamp: new Date().toISOString(),
+					progressSummary: lastProgressSummary || "In progress",
+					filesModified: Array.from(modifiedFiles),
+					currentBranch: config.branchName,
+					pendingWork: `Continue task ${config.beadId}`,
+					mulchDomains: [],
+				};
+				const identityBaseDir = join(overstoryDir, "agents");
+				saveCheckpoint(identityBaseDir, checkpoint).catch((err: unknown) => {
+					console.error("[bridge] checkpoint save failed:", err);
+				});
+				console.log(
+					`[bridge] checkpoint saved (ratio=${ratio.toFixed(2)}, threshold=${config.compactionThreshold})`,
+				);
 			}
 		}
 
@@ -669,127 +872,22 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 		};
 	});
 
-	// Graceful shutdown: session-end bookkeeping
-	try {
-		// Record session_end event
-		tryInsertEvent(eventStore, {
-			runId: config.runId,
-			agentName: config.agentName,
-			sessionId: config.sessionId,
-			eventType: "session_end",
-			toolName: null,
-			toolArgs: null,
-			toolDurationMs: null,
-			level: "info",
-			data: JSON.stringify({ reason: "turn_completed", runtime: "codex" }),
-		});
-
-		// Update session state to "completed" in SessionStore
-		try {
-			const { store: sessionStore } = openSessionStore(overstoryDir);
-			try {
-				sessionStore.updateState(config.agentName, "completed");
-			} finally {
-				sessionStore.close();
-			}
-		} catch {
-			// Non-fatal: session state update failure shouldn't block shutdown
-		}
-
-		// Increment identity.sessionsCompleted
-		try {
-			const identityBaseDir = join(overstoryDir, "agents");
-			await updateIdentity(identityBaseDir, config.agentName, {
-				sessionsCompleted: 1,
-				completedTask: {
-					beadId: config.beadId,
-					summary: `Codex ${config.capability} agent completed task ${config.beadId}`,
-				},
-			});
-		} catch {
-			// Non-fatal: identity update failure shouldn't block shutdown
-		}
-
-		// Auto-record expertise (mirrors Stop hook's `mulch learn`)
-		try {
+	// Graceful shutdown: session-end bookkeeping (delegated to extracted function)
+	await performShutdownBookkeeping(config, overstoryDir, {
+		eventStore,
+		mailClient,
+		openSessionStore,
+		updateIdentity,
+		createRunStore,
+		runMulchLearn: async (cwd: string) => {
 			const mulchProc = Bun.spawn(["mulch", "learn"], {
-				cwd: config.worktreePath,
+				cwd,
 				stdout: "pipe",
 				stderr: "pipe",
 			});
 			await mulchProc.exited;
-		} catch {
-			// Non-fatal: mulch may not be installed or available
-		}
-
-		// Send worker_done mail to parent agent so they can verify and merge
-		if (config.parentAgent) {
-			try {
-				mailClient.send({
-					from: config.agentName,
-					to: config.parentAgent,
-					subject: `Worker done: ${config.beadId}`,
-					body: `Completed task ${config.beadId}. Quality gates: bridge shutdown.`,
-					type: "worker_done",
-					priority: "normal",
-				});
-			} catch {
-				// Non-fatal: mail send failure shouldn't block shutdown
-			}
-		}
-
-		// Auto-nudge coordinator when a lead completes (mirrors log.ts session-end).
-		// Writes a pending-nudge marker so the coordinator wakes up to process
-		// merge_ready/worker_done messages without waiting for user input.
-		if (config.capability === "lead") {
-			try {
-				const nudgesDir = join(overstoryDir, "pending-nudges");
-				await mkdir(nudgesDir, { recursive: true });
-				const markerPath = join(nudgesDir, "coordinator.json");
-				const marker = {
-					from: config.agentName,
-					reason: "lead_completed",
-					subject: `Lead ${config.agentName} completed — check mail for merge_ready/worker_done`,
-					messageId: `auto-nudge-${config.agentName}-${Date.now()}`,
-					createdAt: new Date().toISOString(),
-				};
-				await Bun.write(markerPath, `${JSON.stringify(marker, null, "\t")}\n`);
-			} catch {
-				// Non-fatal: nudge failure should not break session-end
-			}
-		}
-
-		// Auto-complete the current run when the coordinator exits (mirrors log.ts).
-		// Handles the case where the coordinator process ends without explicit
-		// `overstory coordinator stop`.
-		if (config.capability === "coordinator") {
-			try {
-				const currentRunPath = join(overstoryDir, "current-run.txt");
-				const currentRunFile = Bun.file(currentRunPath);
-				if (await currentRunFile.exists()) {
-					const runId = (await currentRunFile.text()).trim();
-					if (runId.length > 0) {
-						const runStore = createRunStore(join(overstoryDir, "sessions.db"));
-						try {
-							runStore.completeRun(runId, "completed");
-						} finally {
-							runStore.close();
-						}
-						const { unlink: unlinkFile } = await import("node:fs/promises");
-						try {
-							await unlinkFile(currentRunPath);
-						} catch {
-							// File may already be gone
-						}
-					}
-				}
-			} catch {
-				// Non-fatal: run completion should not break session-end handling
-			}
-		}
-	} catch {
-		// Non-fatal: bookkeeping errors shouldn't prevent process exit
-	}
+		},
+	});
 
 	// Close connections
 	rpc.close();
