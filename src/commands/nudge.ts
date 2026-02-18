@@ -303,10 +303,37 @@ export async function nudgeAgent(
 			} finally {
 				mailClient.close();
 			}
-			// Wake bridge process so it picks up the mail immediately
-			if (target.bridgePid !== null) {
+			// Wake bridge process so it picks up the mail immediately.
+			// Read the bridge PID file (written by bridge.ts at startup) for the
+			// actual bun process PID. Fall back to session PID if file doesn't exist.
+			let bridgePid = target.bridgePid;
+			try {
+				const pidFile = Bun.file(join(overstoryDir, "agents", agentName, "bridge.pid"));
+				if (await pidFile.exists()) {
+					const pidFromFile = Number.parseInt((await pidFile.text()).trim(), 10);
+					if (!Number.isNaN(pidFromFile)) {
+						bridgePid = pidFromFile;
+					}
+				}
+			} catch {
+				// Fall back to session PID
+			}
+			// Validate PID is still alive before sending SIGUSR1 (C1: stale bridge PID).
+			// process.kill(pid, 0) checks existence without sending a signal; it throws
+			// ESRCH if the process doesn't exist, preventing us from signaling an
+			// unrelated process that reused the PID.
+			if (bridgePid !== null) {
 				try {
-					process.kill(target.bridgePid, "SIGUSR1");
+					process.kill(bridgePid, 0);
+				} catch {
+					// Stale PID — fall back to session PID if it differs
+					bridgePid =
+						target.bridgePid !== null && target.bridgePid !== bridgePid ? target.bridgePid : null;
+				}
+			}
+			if (bridgePid !== null) {
+				try {
+					process.kill(bridgePid, "SIGUSR1");
 				} catch {
 					// Bridge process may have already exited — not fatal
 				}

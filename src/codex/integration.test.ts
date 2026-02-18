@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import type { OverlayConfig } from "../types";
 import { evaluateCommandApproval, evaluateFileChangeApproval } from "./approval";
-import { parseBridgeConfig } from "./bridge";
+import { parseBridgeConfig, shouldShutdown } from "./bridge";
 import { generateCodexConfig } from "./config-gen";
 import { createDeltaBufferManager, normalizeItemCompleted, normalizeItemStarted } from "./events";
 import { generateAgentsOverlay } from "./overlay";
@@ -46,14 +46,15 @@ describe("Codex integration pipeline", () => {
 		});
 		expect(safeResult.decision).toBe("accept");
 
-		// 3. Evaluate a dangerous command → decline
-		const dangerResult = evaluateCommandApproval("git push origin main", {
+		// 3. Builder is an implementation agent → DANGEROUS_BASH_PATTERNS not applied.
+		// Unknown commands escalate to parent instead of being declined.
+		const unknownResult = evaluateCommandApproval("git push origin main", {
 			capability: config.capability,
 			agentName: config.agentName,
 			worktreePath: config.worktreePath,
 			fileScope: config.fileScope,
 		});
-		expect(dangerResult.decision).toBe("decline");
+		expect(unknownResult.decision).toBe("escalate");
 
 		// 4. Create delta buffer, accumulate, flush
 		const deltaManager = createDeltaBufferManager(config.maxDeltaBufferBytes);
@@ -146,11 +147,11 @@ describe("Codex integration pipeline", () => {
 
 	test("generateCodexConfig produces valid TOML for on-request approval", () => {
 		const toml = generateCodexConfig({
-			model: "codex-mini-latest",
+			model: "o3",
 			approvalPolicy: "on-request",
 		});
-		expect(toml).toContain('model = "codex-mini-latest"');
-		expect(toml).toContain('sandbox_policy = "dangerFullAccess"');
+		expect(toml).toContain('model = "o3"');
+		expect(toml).toContain('sandbox_mode = "danger-full-access"');
 		expect(toml).toContain('approval_policy = "on-request"');
 	});
 
@@ -305,5 +306,184 @@ describe("Codex integration pipeline", () => {
 			durationMs: 100,
 		});
 		expect(updateEvent.toolName).toBe("Edit");
+	});
+
+	test("path traversal via ../ is blocked by resolve() normalization", () => {
+		const ctx = {
+			capability: "builder",
+			agentName: "builder-1",
+			worktreePath: "/repo/.overstory/worktrees/builder-1",
+			fileScope: ["src/foo.ts"],
+		};
+
+		// Attempt to escape worktree via ../
+		const traversal = evaluateFileChangeApproval(
+			[{ path: "src/../../etc/passwd", kind: "add" as const }],
+			ctx,
+		);
+		expect(traversal.decision).toBe("decline");
+
+		// Absolute path with ../ that escapes worktree
+		const absTraversal = evaluateFileChangeApproval(
+			[
+				{
+					path: "/repo/.overstory/worktrees/builder-1/../builder-2/src/foo.ts",
+					kind: "update" as const,
+				},
+			],
+			ctx,
+		);
+		expect(absTraversal.decision).toBe("decline");
+
+		// Relative path that stays within worktree after resolve
+		const safeRelative = evaluateFileChangeApproval(
+			[{ path: "src/../src/foo.ts", kind: "update" as const }],
+			ctx,
+		);
+		expect(safeRelative.decision).toBe("accept");
+	});
+
+	test("DANGEROUS_BASH_PATTERNS only applied to non-implementation capabilities", () => {
+		// Scout (non-implementation) → dangerous command is declined
+		const scoutCtx = {
+			capability: "scout",
+			agentName: "scout-1",
+			worktreePath: "/repo/.overstory/worktrees/scout-1",
+			fileScope: [],
+		};
+		const scoutRm = evaluateCommandApproval("rm -rf /tmp/stuff", scoutCtx);
+		expect(scoutRm.decision).toBe("decline");
+
+		// Builder (implementation) → same command escalates instead
+		const builderCtx = {
+			capability: "builder",
+			agentName: "builder-1",
+			worktreePath: "/repo/.overstory/worktrees/builder-1",
+			fileScope: [],
+		};
+		const builderRm = evaluateCommandApproval("rm -rf /tmp/stuff", builderCtx);
+		expect(builderRm.decision).toBe("escalate");
+	});
+
+	test("coordination capabilities can git add/commit despite dangerous patterns", () => {
+		// Coordinator is a coordination capability (coordinator, supervisor, monitor)
+		const coordCtx = {
+			capability: "coordinator",
+			agentName: "coord-1",
+			worktreePath: "/repo/.overstory/worktrees/coord-1",
+			fileScope: [],
+		};
+
+		// git add/commit are in COORDINATION_SAFE_PREFIXES → accept
+		const gitAdd = evaluateCommandApproval("git add src/foo.ts", coordCtx);
+		expect(gitAdd.decision).toBe("accept");
+
+		const gitCommit = evaluateCommandApproval('git commit -m "fix"', coordCtx);
+		expect(gitCommit.decision).toBe("accept");
+
+		// Dangerous patterns still block other commands for coordinators
+		const rmResult = evaluateCommandApproval("rm -rf /tmp/stuff", coordCtx);
+		expect(rmResult.decision).toBe("decline");
+	});
+
+	test("shouldShutdown recognizes terminal statuses", () => {
+		expect(shouldShutdown("completed")).toBe(true);
+		expect(shouldShutdown("failed")).toBe(true);
+		expect(shouldShutdown("cancelled")).toBe(true);
+		expect(shouldShutdown("running")).toBe(false);
+		expect(shouldShutdown("paused")).toBe(false);
+		expect(shouldShutdown("")).toBe(false);
+	});
+
+	test("generateCodexConfig sandbox_mode uses dash-separated key name", () => {
+		const toml = generateCodexConfig({
+			model: "o3",
+			approvalPolicy: "on-request",
+		});
+		// Must be sandbox_mode (not sandbox_policy) with dash-separated value
+		expect(toml).toContain("sandbox_mode");
+		expect(toml).not.toContain("sandbox_policy");
+		expect(toml).toContain("danger-full-access");
+		expect(toml).not.toContain("dangerFullAccess");
+	});
+
+	test("parseBridgeConfig with all fields populated round-trips correctly", () => {
+		// Verifies that every field in BridgeConfig is parsed and
+		// accessible — catches regressions if a new env var is added
+		// but the parser forgets to handle it.
+		const env: Record<string, string> = {
+			OVERSTORY_AGENT_NAME: "lead-alpha",
+			OVERSTORY_WORKTREE_PATH: "/proj/.overstory/worktrees/lead-alpha",
+			OVERSTORY_BRANCH_NAME: "overstory/lead-alpha/task-999",
+			OVERSTORY_BEAD_ID: "task-999",
+			OVERSTORY_CAPABILITY: "lead",
+			OVERSTORY_PARENT_AGENT: "coordinator",
+			OVERSTORY_DEPTH: "1",
+			OVERSTORY_RUN_ID: "run-42",
+			OVERSTORY_SESSION_ID: "sess-42",
+			OVERSTORY_CODEX_SERVER_URL: "ws://127.0.0.1:9999",
+			OVERSTORY_CODEX_MODEL: "gpt-4.1",
+			OVERSTORY_COMPACTION_THRESHOLD: "0.9",
+			OVERSTORY_MAX_DELTA_BUFFER: "2097152",
+			OVERSTORY_APPROVAL_TIMEOUT: "120000",
+			OVERSTORY_FILE_SCOPE: "src/a.ts,src/b.ts,src/c.ts",
+			OVERSTORY_PROJECT_ROOT: "/proj",
+		};
+
+		const cfg = parseBridgeConfig(env);
+
+		expect(cfg.agentName).toBe("lead-alpha");
+		expect(cfg.capability).toBe("lead");
+		expect(cfg.parentAgent).toBe("coordinator");
+		expect(cfg.depth).toBe(1);
+		expect(cfg.runId).toBe("run-42");
+		expect(cfg.sessionId).toBe("sess-42");
+		expect(cfg.serverUrl).toBe("ws://127.0.0.1:9999");
+		expect(cfg.model).toBe("gpt-4.1");
+		expect(cfg.compactionThreshold).toBe(0.9);
+		expect(cfg.maxDeltaBufferBytes).toBe(2097152);
+		expect(cfg.approvalTimeoutMs).toBe(120000);
+		expect(cfg.fileScope).toEqual(["src/a.ts", "src/b.ts", "src/c.ts"]);
+		expect(cfg.projectRoot).toBe("/proj");
+	});
+
+	test("generateCodexConfig with never policy still includes sandbox_mode", () => {
+		// When approval_policy is "never", sandbox_mode should still be present
+		// (the App Server needs to know the sandbox environment)
+		const toml = generateCodexConfig({
+			model: "gpt-4.1",
+			approvalPolicy: "never",
+		});
+		expect(toml).toContain('model = "gpt-4.1"');
+		expect(toml).toContain('approval_policy = "never"');
+		expect(toml).toContain('sandbox_mode = "danger-full-access"');
+	});
+
+	test("buildInitialPrompt inputs: parseBridgeConfig populates all priming fields", () => {
+		// buildInitialPrompt is not exported, but we can verify its inputs
+		// by testing that parseBridgeConfig correctly populates all the
+		// fields that buildInitialPrompt depends on: agentName, capability,
+		// beadId, depth, parentAgent, sessionId, and projectRoot.
+		const config = parseBridgeConfig({
+			OVERSTORY_AGENT_NAME: "builder-priming",
+			OVERSTORY_CAPABILITY: "builder",
+			OVERSTORY_BEAD_ID: "task-prime-1",
+			OVERSTORY_DEPTH: "2",
+			OVERSTORY_PARENT_AGENT: "lead-1",
+			OVERSTORY_SESSION_ID: "sess-prime",
+			OVERSTORY_PROJECT_ROOT: "/proj",
+		});
+
+		// All fields used by buildInitialPrompt must be populated
+		expect(config.agentName).toBe("builder-priming");
+		expect(config.capability).toBe("builder");
+		expect(config.beadId).toBe("task-prime-1");
+		expect(config.depth).toBe(2);
+		expect(config.parentAgent).toBe("lead-1");
+		expect(config.sessionId).toBe("sess-prime");
+		expect(config.projectRoot).toBe("/proj");
+		// Defaults for optional fields should still be sane
+		expect(config.serverUrl).toContain("ws://");
+		expect(config.model.length).toBeGreaterThan(0);
 	});
 });
