@@ -19,7 +19,14 @@ export function parseServerState(raw: string): CodexServerState | null {
 		) {
 			return null;
 		}
-		return parsed as unknown as CodexServerState;
+		// Build a validated object instead of double-casting
+		const state: CodexServerState = {
+			pid: parsed.pid,
+			port: parsed.port,
+			startedAt: parsed.startedAt,
+			url: parsed.url,
+		};
+		return state;
 	} catch {
 		return null;
 	}
@@ -60,12 +67,24 @@ export async function startServer(overstoryDir: string, port: number): Promise<C
 		cwd: overstoryDir,
 	});
 
-	// Give server time to bind
-	await Bun.sleep(2000);
+	// Race: either the process exits early (error) or we wait for it to bind.
+	// If proc.exited resolves first, the server crashed on startup.
+	const exited = await Promise.race([
+		proc.exited.then((code) => code),
+		Bun.sleep(2000).then(() => null),
+	]);
 
-	// Verify it's alive
-	if (!proc.pid) {
-		throw new Error("Failed to start Codex App Server: no PID");
+	if (exited !== null) {
+		const stderr = await new Response(proc.stderr).text();
+		throw new Error(`Codex App Server exited immediately (code ${exited}): ${stderr.trim()}`);
+	}
+
+	// Verify process is alive after the startup window
+	try {
+		process.kill(proc.pid, 0);
+	} catch {
+		const stderr = await new Response(proc.stderr).text();
+		throw new Error(`Codex App Server died during startup: ${stderr.trim()}`);
 	}
 
 	const state: CodexServerState = {

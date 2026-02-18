@@ -1,9 +1,16 @@
 // src/codex/rpc-client.ts
 import type { JsonRpcRequest } from "./types";
 
+/** Handler for server-initiated requests. Returns the result to send back. */
+export type RequestHandler = (method: string, params: unknown) => Promise<unknown> | unknown;
+
 export interface RpcClient {
 	request(method: string, params?: Record<string, unknown>): Promise<unknown>;
 	onNotification(handler: (method: string, params: unknown) => void): void;
+	/** Register a handler for server-initiated requests (has id + method) */
+	onRequest(handler: RequestHandler): void;
+	/** Whether the WebSocket connection has been closed */
+	readonly closed: boolean;
 	close(): void;
 }
 
@@ -21,7 +28,9 @@ export async function createRpcClient(
 	let nextId = 1;
 	const pending = new Map<number | string, PendingRequest>();
 	const notificationHandlers: Array<(method: string, params: unknown) => void> = [];
+	const requestHandlers: RequestHandler[] = [];
 
+	let isClosed = false;
 	const ws = new WebSocket(url);
 
 	// Wait for connection
@@ -37,11 +46,78 @@ export async function createRpcClient(
 		});
 	});
 
+	// Handle unexpected connection loss after initial connect
+	ws.addEventListener("close", () => {
+		isClosed = true;
+		for (const [, req] of pending) {
+			clearTimeout(req.timer);
+			req.reject(new Error("WebSocket closed"));
+		}
+		pending.clear();
+	});
+
+	ws.addEventListener("error", () => {
+		// Error events after connection are often followed by close events.
+		// The close handler above handles cleanup; this prevents unhandled errors.
+	});
+
 	ws.addEventListener("message", (event) => {
 		const data = JSON.parse(String(event.data)) as Record<string, unknown>;
 
-		// Response (has id)
-		if ("id" in data && data.id != null) {
+		const hasId = "id" in data && data.id != null;
+		const hasMethod = "method" in data && typeof data.method === "string";
+
+		// Server-initiated request (has BOTH id and method).
+		// Must be checked BEFORE responses since both have an id field.
+		if (hasId && hasMethod) {
+			const incomingId = data.id as number | string;
+			const method = data.method as string;
+
+			// Dispatch to request handlers and send response.
+			// Break on first handler that returns a non-nullish result.
+			(async () => {
+				try {
+					let result: unknown;
+					for (const handler of requestHandlers) {
+						const handlerResult = await handler(method, data.params);
+						if (handlerResult !== null && handlerResult !== undefined) {
+							result = handlerResult;
+							break;
+						}
+					}
+					ws.send(
+						JSON.stringify({
+							jsonrpc: "2.0",
+							id: incomingId,
+							result: result ?? null,
+						}),
+					);
+				} catch (err) {
+					ws.send(
+						JSON.stringify({
+							jsonrpc: "2.0",
+							id: incomingId,
+							error: {
+								code: -32603,
+								message: err instanceof Error ? err.message : "Internal error",
+							},
+						}),
+					);
+				}
+			})().catch((err: unknown) => {
+				console.error("[rpc-client] request handler error:", err);
+			});
+
+			// Also dispatch to notification handlers for observability
+			// (the bridge's notification handler can still see these events)
+			for (const handler of notificationHandlers) {
+				handler(method, data.params);
+			}
+			return;
+		}
+
+		// Response to our outgoing request (has id, no method)
+		if (hasId && !hasMethod) {
 			const req = pending.get(data.id as number | string);
 			if (!req) return;
 			pending.delete(data.id as number | string);
@@ -56,7 +132,7 @@ export async function createRpcClient(
 		}
 
 		// Notification (no id, has method)
-		if ("method" in data) {
+		if (hasMethod) {
 			for (const handler of notificationHandlers) {
 				handler(data.method as string, data.params);
 			}
@@ -65,6 +141,9 @@ export async function createRpcClient(
 
 	return {
 		request(method, params) {
+			if (isClosed) {
+				return Promise.reject(new Error(`WebSocket closed, cannot send: ${method}`));
+			}
 			return new Promise((resolve, reject) => {
 				const id = nextId++;
 				const timer = setTimeout(() => {
@@ -84,8 +163,17 @@ export async function createRpcClient(
 			notificationHandlers.push(handler);
 		},
 
+		onRequest(handler) {
+			requestHandlers.push(handler);
+		},
+
+		get closed() {
+			return isClosed;
+		},
+
 		close() {
-			for (const [_id, req] of pending) {
+			isClosed = true;
+			for (const [, req] of pending) {
 				clearTimeout(req.timer);
 				req.reject(new Error("Client closed"));
 			}
