@@ -75,6 +75,7 @@ function makeSession(overrides: Partial<AgentSession> = {}): AgentSession {
 		runId: null,
 		escalationLevel: 0,
 		stalledSince: null,
+		runtime: "claude",
 		startedAt: new Date().toISOString(),
 		lastActivity: new Date().toISOString(),
 		...overrides,
@@ -804,6 +805,7 @@ describe("daemon tick", () => {
 			pid: process.pid,
 			escalationLevel: 0,
 			stalledSince: null,
+			runtime: "claude",
 		});
 
 		writeSessionsToStore(tempRoot, [session]);
