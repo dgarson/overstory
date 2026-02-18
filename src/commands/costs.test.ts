@@ -459,6 +459,7 @@ describe("costsCommand", () => {
 				lastActivity: new Date().toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
+				runtime: "claude",
 			});
 			sessionStore.upsert({
 				id: "sess-002",
@@ -477,6 +478,7 @@ describe("costsCommand", () => {
 				lastActivity: new Date().toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
+				runtime: "claude",
 			});
 			sessionStore.close();
 
@@ -812,6 +814,7 @@ describe("costsCommand", () => {
 				lastActivity: new Date().toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
+				runtime: "claude",
 			});
 			sessionStore.close();
 
@@ -868,6 +871,7 @@ describe("costsCommand", () => {
 				lastActivity: new Date().toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
+				runtime: "claude",
 			});
 			sessionStore.close();
 
@@ -932,6 +936,7 @@ describe("costsCommand", () => {
 				lastActivity: new Date().toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
+				runtime: "claude",
 			});
 			sessionStore.upsert({
 				id: "sess-002",
@@ -950,6 +955,7 @@ describe("costsCommand", () => {
 				lastActivity: new Date().toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
+				runtime: "claude",
 			});
 			sessionStore.close();
 
@@ -1009,6 +1015,7 @@ describe("costsCommand", () => {
 				lastActivity: new Date().toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
+				runtime: "claude",
 			});
 			sessionStore.close();
 
