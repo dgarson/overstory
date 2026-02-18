@@ -7,7 +7,15 @@
  */
 
 import { Database } from "bun:sqlite";
-import type { AgentRuntime, AgentSession, AgentState, InsertRun, Run, RunStatus, RunStore } from "../types.ts";
+import type {
+	AgentRuntime,
+	AgentSession,
+	AgentState,
+	InsertRun,
+	Run,
+	RunStatus,
+	RunStore,
+} from "../types.ts";
 
 export interface SessionStore {
 	/** Insert or update a session. Uses agent_name as the unique key. */
