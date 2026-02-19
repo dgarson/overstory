@@ -138,6 +138,51 @@ describe("AgentPool", () => {
 		await expect(pool.remove("nobody")).resolves.toBeUndefined();
 	});
 
+	test("nudge calls rpc.request with message", async () => {
+		const requests: Array<{ method: string; params: unknown }> = [];
+		const pool = createAgentPool({
+			createRpcClient: async () => ({
+				request: async (method: string, params?: Record<string, unknown>) => {
+					requests.push({ method, params });
+					return {};
+				},
+				onNotification: () => {},
+				onRequest: () => {},
+				closed: false,
+				close: () => {},
+			}),
+		});
+		// Set activeTurnId so nudge proceeds to the rpc call
+		await pool.add(makeBridgeConfig({ agentName: "test-agent" }));
+		const agent = pool.get("test-agent");
+		if (agent) {
+			agent.activeTurnId = "turn-1";
+		}
+		await pool.nudge("test-agent", "check your mail");
+		expect(requests.length).toBe(1);
+		expect(requests[0]?.method).toBe("agent/nudge");
+		const params = requests[0]?.params as { message: string };
+		expect(params.message).toBe("check your mail");
+	});
+
+	test("remove calls rpc.close()", async () => {
+		let closeCalled = false;
+		const pool = createAgentPool({
+			createRpcClient: async () => ({
+				request: async () => ({}),
+				onNotification: () => {},
+				onRequest: () => {},
+				closed: false,
+				close: () => {
+					closeCalled = true;
+				},
+			}),
+		});
+		await pool.add(makeBridgeConfig({ agentName: "test-agent" }));
+		await pool.remove("test-agent");
+		expect(closeCalled).toBe(true);
+	});
+
 	test("threadId is a UUID-shaped string", async () => {
 		const pool = createAgentPool({ createRpcClient: async () => mockRpcClient() });
 		await pool.add(makeBridgeConfig({ agentName: "uuid-check" }));
