@@ -78,7 +78,7 @@ describe("AgentPool", () => {
 	test("add rejects duplicate agent name", async () => {
 		const pool = createAgentPool({ createRpcClient: async () => mockRpcClient() });
 		await pool.add(makeBridgeConfig({ agentName: "dup" }));
-		expect(pool.add(makeBridgeConfig({ agentName: "dup" }))).rejects.toThrow();
+		await expect(pool.add(makeBridgeConfig({ agentName: "dup" }))).rejects.toThrow();
 	});
 
 	test("drain removes all agents", async () => {

@@ -1,6 +1,7 @@
 // src/codex/daemon/pool.ts
 // AgentPool: manages a collection of daemon-side Codex agent RPC connections.
 import { randomUUID } from "node:crypto";
+import { AgentError } from "../../errors.ts";
 import type { RpcClient } from "../rpc-client.ts";
 import type { BridgeConfig } from "../types.ts";
 
@@ -36,7 +37,9 @@ export function createAgentPool(deps: AgentPoolDeps): AgentPool {
 	return {
 		async add(config: BridgeConfig): Promise<void> {
 			if (agents.has(config.agentName)) {
-				throw new Error(`Agent already registered in pool: ${config.agentName}`);
+				throw new AgentError(`Agent already registered in pool: ${config.agentName}`, {
+					agentName: config.agentName,
+				});
 			}
 			const rpc = await deps.createRpcClient(config.serverUrl);
 			agents.set(config.agentName, {
@@ -57,12 +60,8 @@ export function createAgentPool(deps: AgentPoolDeps): AgentPool {
 			if (agent === undefined || agent.activeTurnId === null) {
 				return false;
 			}
-			try {
-				await agent.rpc.request("agent/steer", { input, turnId: agent.activeTurnId });
-				return true;
-			} catch {
-				return false;
-			}
+			await agent.rpc.request("agent/steer", { input, turnId: agent.activeTurnId });
+			return true;
 		},
 
 		async nudge(
@@ -104,7 +103,16 @@ export function createAgentPool(deps: AgentPoolDeps): AgentPool {
 		},
 
 		async drain(): Promise<void> {
-			await Promise.all(this.names().map((name) => this.remove(name)));
+			const namesToRemove = Array.from(agents.keys());
+			await Promise.all(
+				namesToRemove.map(async (name) => {
+					const agent = agents.get(name);
+					if (agent !== undefined) {
+						agent.rpc.close();
+						agents.delete(name);
+					}
+				}),
+			);
 		},
 	};
 }
