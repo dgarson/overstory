@@ -105,6 +105,32 @@ describe("AgentPool", () => {
 		expect(result).toBe(false);
 	});
 
+	test("steer dispatches agent/steer RPC when turn is active", async () => {
+		const rpcRequests: Array<{ method: string; params: unknown }> = [];
+		const pool = createAgentPool({
+			createRpcClient: async () => ({
+				request: async (method: string, params?: Record<string, unknown>) => {
+					rpcRequests.push({ method, params });
+					return {};
+				},
+				onNotification: () => {},
+				onRequest: () => {},
+				closed: false,
+				close: () => {},
+			}),
+		});
+		await pool.add(makeBridgeConfig({ agentName: "alpha" }));
+		const agent = pool.get("alpha");
+		if (agent !== undefined) {
+			agent.activeTurnId = "t1";
+		}
+		const delivered = await pool.steer("alpha", "hello");
+		expect(delivered).toBe(true);
+		const calls = rpcRequests.filter((r) => r.method === "agent/steer");
+		expect(calls.length).toBe(1);
+		expect(calls[0]?.params).toMatchObject({ input: "hello", turnId: "t1" });
+	});
+
 	test("nudge returns delivered false when no active turn", async () => {
 		const pool = createAgentPool({ createRpcClient: async () => mockRpcClient() });
 		await pool.add(makeBridgeConfig({ agentName: "agent-x" }));
@@ -155,14 +181,13 @@ describe("AgentPool", () => {
 		// Set activeTurnId so nudge proceeds to the rpc call
 		await pool.add(makeBridgeConfig({ agentName: "test-agent" }));
 		const agent = pool.get("test-agent");
-		if (agent) {
+		if (agent !== undefined) {
 			agent.activeTurnId = "turn-1";
 		}
 		await pool.nudge("test-agent", "check your mail");
 		expect(requests.length).toBe(1);
 		expect(requests[0]?.method).toBe("agent/nudge");
-		const params = requests[0]?.params as { message: string };
-		expect(params.message).toBe("check your mail");
+		expect(requests[0]?.params).toMatchObject({ message: "check your mail" });
 	});
 
 	test("remove calls rpc.close()", async () => {
