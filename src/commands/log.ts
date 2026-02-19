@@ -13,6 +13,7 @@
 import { join } from "node:path";
 import { updateIdentity } from "../agents/identity.ts";
 import { loadConfig } from "../config.ts";
+import { createControlClient } from "../control/client.ts";
 import { ValidationError } from "../errors.ts";
 import { createEventStore } from "../events/store.ts";
 import { filterToolArgs } from "../events/tool-filter.ts";
@@ -415,6 +416,7 @@ export async function logCommand(args: string[]): Promise<void> {
 	const config = await loadConfig(cwd);
 	const logsBase = join(config.project.root, ".overstory", "logs");
 	const sessionDir = await getSessionDir(logsBase, agentName);
+	const controlClient = createControlClient(join(config.project.root, ".overstory"));
 
 	const logger = createLogger({
 		logDir: sessionDir,
@@ -428,6 +430,9 @@ export async function logCommand(args: string[]): Promise<void> {
 			// Backward compatibility: always write to per-agent log files
 			logger.toolStart(toolName, toolInput ?? {});
 			updateLastActivity(config.project.root, agentName);
+			if (config.control.enabled) {
+				await controlClient.toolLifecycle(agentName, "enter");
+			}
 
 			// When --stdin is used, also write to EventStore for structured observability
 			if (useStdin) {
@@ -459,6 +464,9 @@ export async function logCommand(args: string[]): Promise<void> {
 			// Backward compatibility: always write to per-agent log files
 			logger.toolEnd(toolName, 0);
 			updateLastActivity(config.project.root, agentName);
+			if (config.control.enabled) {
+				await controlClient.toolLifecycle(agentName, "exit");
+			}
 
 			// When --stdin is used, write to EventStore and correlate with tool-start
 			if (useStdin) {
@@ -541,6 +549,9 @@ export async function logCommand(args: string[]): Promise<void> {
 			logger.info("session.end", { agentName });
 			// Transition agent state to completed
 			transitionToCompleted(config.project.root, agentName);
+			if (config.control.enabled) {
+				await controlClient.markOffline(agentName);
+			}
 			// Look up agent session for identity update and metrics recording
 			{
 				const agentSession = getAgentSession(config.project.root, agentName);

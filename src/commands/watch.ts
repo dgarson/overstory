@@ -8,6 +8,7 @@
 
 import { join } from "node:path";
 import { loadConfig } from "../config.ts";
+import { ensureControlServer } from "../control/client.ts";
 import { OverstoryError } from "../errors.ts";
 import type { HealthCheck } from "../types.ts";
 import { startDaemon } from "../watchdog/daemon.ts";
@@ -154,6 +155,10 @@ export async function watchCommand(args: string[]): Promise<void> {
 
 	const cwd = process.cwd();
 	const config = await loadConfig(cwd);
+	const overstoryDir = join(config.project.root, ".overstory");
+	if (config.control.enabled) {
+		await ensureControlServer(config.project.root, overstoryDir, config.control);
+	}
 
 	const intervalMs = intervalStr
 		? Number.parseInt(intervalStr, 10)
@@ -161,7 +166,7 @@ export async function watchCommand(args: string[]): Promise<void> {
 
 	const staleThresholdMs = config.watchdog.staleThresholdMs;
 	const zombieThresholdMs = config.watchdog.zombieThresholdMs;
-	const pidFilePath = join(config.project.root, ".overstory", "watchdog.pid");
+	const pidFilePath = join(overstoryDir, "watchdog.pid");
 
 	if (background) {
 		// Check if a watchdog is already running

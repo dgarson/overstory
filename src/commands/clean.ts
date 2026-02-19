@@ -24,6 +24,7 @@ import { readdir, rm, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { stopServer } from "../codex/server.ts";
 import { loadConfig } from "../config.ts";
+import { stopControlServer } from "../control/server.ts";
 import { ValidationError } from "../errors.ts";
 import { createEventStore } from "../events/store.ts";
 import { createMulchClient } from "../mulch/client.ts";
@@ -106,12 +107,14 @@ async function logSyntheticSessionEndEvents(overstoryDir: string): Promise<numbe
 interface CleanResult {
 	sessionEndEventsLogged: number;
 	codexServerStopped: boolean;
+	controlServerStopped: boolean;
 	tmuxKilled: number;
 	worktreesCleaned: number;
 	branchesDeleted: number;
 	mailWiped: boolean;
 	sessionsCleared: boolean;
 	mergeQueueCleared: boolean;
+	controlDbWiped: boolean;
 	metricsWiped: boolean;
 	logsCleared: boolean;
 	agentsCleared: boolean;
@@ -451,12 +454,14 @@ export async function cleanCommand(args: string[]): Promise<void> {
 	const result: CleanResult = {
 		sessionEndEventsLogged: 0,
 		codexServerStopped: false,
+		controlServerStopped: false,
 		tmuxKilled: 0,
 		worktreesCleaned: 0,
 		branchesDeleted: 0,
 		mailWiped: false,
 		sessionsCleared: false,
 		mergeQueueCleared: false,
+		controlDbWiped: false,
 		metricsWiped: false,
 		logsCleared: false,
 		agentsCleared: false,
@@ -486,6 +491,7 @@ export async function cleanCommand(args: string[]): Promise<void> {
 	if (all) {
 		try {
 			result.codexServerStopped = await stopServer(overstoryDir);
+			result.controlServerStopped = await stopControlServer(overstoryDir);
 		} catch {
 			// Non-fatal: server may already be stopped or not present
 		}
@@ -529,6 +535,7 @@ export async function cleanCommand(args: string[]): Promise<void> {
 	}
 	if (all) {
 		result.mergeQueueCleared = await wipeSqliteDb(join(overstoryDir, "merge-queue.db"));
+		result.controlDbWiped = await wipeSqliteDb(join(overstoryDir, "control.db"));
 	}
 
 	// 7. Clear directories
@@ -557,6 +564,7 @@ export async function cleanCommand(args: string[]): Promise<void> {
 
 	const lines: string[] = [];
 	if (result.codexServerStopped) lines.push("Stopped Codex App Server");
+	if (result.controlServerStopped) lines.push("Stopped control daemon");
 	if (result.sessionEndEventsLogged > 0) {
 		lines.push(
 			`Logged ${result.sessionEndEventsLogged} synthetic session-end event${result.sessionEndEventsLogged === 1 ? "" : "s"}`,
@@ -579,6 +587,7 @@ export async function cleanCommand(args: string[]): Promise<void> {
 	if (result.metricsWiped) lines.push("Wiped metrics.db");
 	if (result.sessionsCleared) lines.push("Wiped sessions.db");
 	if (result.mergeQueueCleared) lines.push("Wiped merge-queue.db");
+	if (result.controlDbWiped) lines.push("Wiped control.db");
 	if (result.logsCleared) lines.push("Cleared logs/");
 	if (result.agentsCleared) lines.push("Cleared agents/");
 	if (result.specsCleared) lines.push("Cleared specs/");

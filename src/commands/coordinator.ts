@@ -18,6 +18,7 @@ import { deployHooks } from "../agents/hooks-deployer.ts";
 import { createIdentity, loadIdentity } from "../agents/identity.ts";
 import { createManifestLoader, resolveModel } from "../agents/manifest.ts";
 import { loadConfig } from "../config.ts";
+import { createControlClient, ensureControlServer } from "../control/client.ts";
 import { AgentError, ValidationError } from "../errors.ts";
 import { openSessionStore } from "../sessions/compat.ts";
 import { createRunStore } from "../sessions/store.ts";
@@ -274,6 +275,10 @@ async function startCoordinator(args: string[], deps: CoordinatorDeps = {}): Pro
 
 	// Check for existing coordinator
 	const overstoryDir = join(projectRoot, ".overstory");
+	if (config.control.enabled) {
+		await ensureControlServer(projectRoot, overstoryDir, config.control);
+	}
+	const controlClient = createControlClient(overstoryDir);
 	const { store } = openSessionStore(overstoryDir);
 	try {
 		const existing = store.getByName(COORDINATOR_NAME);
@@ -364,9 +369,21 @@ async function startCoordinator(args: string[], deps: CoordinatorDeps = {}): Pro
 			lastActivity: new Date().toISOString(),
 			escalationLevel: 0,
 			stalledSince: null,
+			runtime: "claude",
+			driverKind: "claude-hooks",
 		};
 
 		store.upsert(session);
+		if (config.control.enabled) {
+			await controlClient.registerAgent({
+				agentName: COORDINATOR_NAME,
+				sessionId: session.id,
+				runtime: "claude",
+				driverKind: "claude-hooks",
+				tmuxSession,
+				pid,
+			});
+		}
 
 		// Send beacon after TUI initialization delay
 		await Bun.sleep(3_000);
@@ -449,6 +466,7 @@ async function stopCoordinator(args: string[], deps: CoordinatorDeps = {}): Prom
 	const monitor = deps._monitor ?? createDefaultMonitor(projectRoot);
 
 	const overstoryDir = join(projectRoot, ".overstory");
+	const controlClient = createControlClient(overstoryDir);
 	const { store } = openSessionStore(overstoryDir);
 	try {
 		const session = store.getByName(COORDINATOR_NAME);
@@ -479,6 +497,9 @@ async function stopCoordinator(args: string[], deps: CoordinatorDeps = {}): Prom
 		// Update session state
 		store.updateState(COORDINATOR_NAME, "completed");
 		store.updateLastActivity(COORDINATOR_NAME);
+		if (config.control.enabled) {
+			await controlClient.markOffline(COORDINATOR_NAME);
+		}
 
 		// Auto-complete the current run
 		let runCompleted = false;

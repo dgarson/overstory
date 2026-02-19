@@ -30,6 +30,7 @@ import { writeCodexConfig } from "../codex/config-gen.ts";
 import { writeAgentsOverlay } from "../codex/overlay.ts";
 import { startServer } from "../codex/server.ts";
 import { loadConfig } from "../config.ts";
+import { createControlClient, ensureControlServer } from "../control/client.ts";
 import { AgentError, ConfigError, HierarchyError, ValidationError } from "../errors.ts";
 import { createMulchClient } from "../mulch/client.ts";
 import { openSessionStore } from "../sessions/compat.ts";
@@ -270,6 +271,13 @@ export async function slingCommand(args: string[]): Promise<void> {
 	// 1. Load config
 	const cwd = process.cwd();
 	const config = await loadConfig(cwd);
+	const overstoryDir = join(config.project.root, ".overstory");
+
+	// Ensure control daemon singleton is up before agent registration/lifecycle updates.
+	if (config.control.enabled) {
+		await ensureControlServer(config.project.root, overstoryDir, config.control);
+	}
+	const controlClient = createControlClient(overstoryDir);
 
 	// 1b. Resolve runtime: --runtime flag > per-capability default from config > "claude"
 	const runtime: AgentRuntime = resolveRuntime(
@@ -306,7 +314,6 @@ export async function slingCommand(args: string[]): Promise<void> {
 	}
 
 	// 4. Resolve or create run_id for this spawn
-	const overstoryDir = join(config.project.root, ".overstory");
 	const currentRunPath = join(overstoryDir, "current-run.txt");
 	let runId: string;
 
@@ -569,9 +576,22 @@ export async function slingCommand(args: string[]): Promise<void> {
 			escalationLevel: 0,
 			stalledSince: null,
 			runtime,
+			driverKind: runtime === "codex" ? "codex-bridge" : "claude-hooks",
 		};
 
 		store.upsert(session);
+
+		// Register the session with the control daemon (best-effort, non-fatal).
+		if (config.control.enabled) {
+			await controlClient.registerAgent({
+				agentName: name,
+				sessionId,
+				runtime,
+				driverKind: runtime === "codex" ? "codex-bridge" : "claude-hooks",
+				tmuxSession: tmuxSessionName,
+				pid,
+			});
+		}
 
 		// Increment agent count for the run
 		const runStore = createRunStore(join(overstoryDir, "sessions.db"));

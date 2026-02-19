@@ -11,6 +11,7 @@ import { agentsCommand } from "./commands/agents.ts";
 import { cleanCommand } from "./commands/clean.ts";
 import { codexCommand } from "./commands/codex.ts";
 import { completionsCommand } from "./commands/completions.ts";
+import { controlCommand } from "./commands/control.ts";
 import { coordinatorCommand } from "./commands/coordinator.ts";
 import { costsCommand } from "./commands/costs.ts";
 import { dashboardCommand } from "./commands/dashboard.ts";
@@ -57,6 +58,7 @@ Commands:
   dashboard               Live TUI dashboard for agent monitoring
   inspect <agent>         Deep inspection of a single agent
   coordinator <sub>       Persistent coordinator agent (start/stop/status)
+  control <sub>           Control daemon (start/stop/status)
   supervisor <sub>        Per-project supervisor agent (start/stop/status)
   hooks <sub>             Manage orchestrator hooks (install/uninstall/status)
   mail <sub>              Mail system (send/check/list/read/reply)
@@ -98,6 +100,7 @@ const COMMANDS = [
 	"clean",
 	"doctor",
 	"coordinator",
+	"control",
 	"supervisor",
 	"hooks",
 	"monitor",
@@ -223,6 +226,9 @@ async function main(): Promise<void> {
 		}
 		case "coordinator":
 			await coordinatorCommand(commandArgs);
+			break;
+		case "control":
+			await controlCommand(commandArgs);
 			break;
 		case "supervisor":
 			await supervisorCommand(commandArgs);

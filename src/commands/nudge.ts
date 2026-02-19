@@ -13,6 +13,7 @@
  */
 
 import { join } from "node:path";
+import { createControlClient } from "../control/client.ts";
 import { AgentError, ValidationError } from "../errors.ts";
 import { createEventStore } from "../events/store.ts";
 import { createMailClient } from "../mail/client.ts";
@@ -90,6 +91,7 @@ async function loadOrchestratorTmuxSession(projectRoot: string): Promise<string 
 interface ResolvedTarget {
 	tmuxSession: string;
 	runtime: AgentRuntime;
+	driverKind: "claude-hooks" | "codex-bridge";
 	bridgePid: number | null;
 }
 
@@ -114,6 +116,10 @@ async function resolveTargetSession(
 			return {
 				tmuxSession: session.tmuxSession,
 				runtime: session.runtime ?? "claude",
+				driverKind:
+					session.driverKind ?? ((session.runtime ?? "claude") === "codex"
+						? "codex-bridge"
+						: "claude-hooks"),
 				bridgePid: session.pid,
 			};
 		}
@@ -125,7 +131,7 @@ async function resolveTargetSession(
 	if (agentName === "orchestrator") {
 		const tmuxSession = await loadOrchestratorTmuxSession(projectRoot);
 		if (tmuxSession !== null) {
-			return { tmuxSession, runtime: "claude", bridgePid: null };
+			return { tmuxSession, runtime: "claude", driverKind: "claude-hooks", bridgePid: null };
 		}
 	}
 
@@ -262,6 +268,7 @@ async function nudgeCodexAgent(
 	sessionPid: number | null,
 	message: string,
 	statePath: string,
+	controlClient: ReturnType<typeof createControlClient>,
 ): Promise<{ delivered: boolean; reason?: string }> {
 	// Send mail so the bridge has a message to act on.
 	const mailStore = createMailStore(join(overstoryDir, "mail.db"));
@@ -277,6 +284,22 @@ async function nudgeCodexAgent(
 		});
 	} finally {
 		mailClient.close();
+	}
+
+	// Prefer daemon-mediated wakeup when available.
+	const safe = await controlClient.safeNudge(agentName, message);
+	if (safe !== null) {
+		if (safe.delivered) {
+			await recordNudge(statePath, agentName);
+			return { delivered: true };
+		}
+		if (safe.deferred) {
+			return {
+				delivered: false,
+				reason: `Deferred by control daemon: ${safe.reason ?? "delivery deferred"}`,
+			};
+		}
+		return { delivered: false, reason: safe.reason ?? "Control daemon nudge failed" };
 	}
 
 	// Resolve the bridge PID. The bridge writes its actual bun process PID to
@@ -360,6 +383,7 @@ export async function nudgeAgent(
 ): Promise<{ delivered: boolean; reason?: string }> {
 	const overstoryDir = join(projectRoot, ".overstory");
 	const statePath = join(overstoryDir, "nudge-state.json");
+	const controlClient = createControlClient(overstoryDir);
 
 	const target = await resolveTargetSession(projectRoot, agentName);
 	if (!target) {
@@ -372,8 +396,31 @@ export async function nudgeAgent(
 
 	const result =
 		target.runtime === "codex"
-			? await nudgeCodexAgent(overstoryDir, agentName, target.bridgePid, message, statePath)
-			: await nudgeClaudeAgent(target.tmuxSession, agentName, message, statePath);
+			? await nudgeCodexAgent(
+					overstoryDir,
+					agentName,
+					target.bridgePid,
+					message,
+					statePath,
+					controlClient,
+				)
+			: await (async () => {
+					const safe = await controlClient.safeNudge(agentName, message);
+					if (safe !== null) {
+						if (safe.delivered) {
+							await recordNudge(statePath, agentName);
+							return { delivered: true };
+						}
+						if (safe.deferred) {
+							return {
+								delivered: false,
+								reason: `Deferred by control daemon: ${safe.reason ?? "delivery deferred"}`,
+							};
+						}
+						return { delivered: false, reason: safe.reason ?? "Control daemon nudge failed" };
+					}
+					return nudgeClaudeAgent(target.tmuxSession, agentName, message, statePath);
+				})();
 
 	// Record event to EventStore (fire-and-forget)
 	try {

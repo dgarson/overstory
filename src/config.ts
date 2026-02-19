@@ -57,6 +57,14 @@ export const DEFAULT_CONFIG: OverstoryConfig = {
 		maxDeltaBufferBytes: 1_048_576,
 		approvalTimeoutMs: 60_000,
 	},
+	control: {
+		enabled: true,
+		port: 21827,
+		loopIntervalMs: 5_000,
+		idleThresholdMs: 3_000,
+		leaseMs: 60_000,
+		nudgeCooldownMs: 8_000,
+	},
 };
 
 const CONFIG_FILENAME = "config.yaml";
@@ -481,6 +489,42 @@ function validateConfig(config: OverstoryConfig): void {
 		throw new ValidationError("codex.approvalTimeoutMs must be a positive integer", {
 			field: "codex.approvalTimeoutMs",
 			value: codex.approvalTimeoutMs,
+		});
+	}
+
+	// control config validation
+	if (!Number.isInteger(config.control.port) || config.control.port < 1 || config.control.port > 65535) {
+		throw new ValidationError("control.port must be an integer between 1 and 65535", {
+			field: "control.port",
+			value: config.control.port,
+		});
+	}
+
+	if (!Number.isInteger(config.control.loopIntervalMs) || config.control.loopIntervalMs < 100) {
+		throw new ValidationError("control.loopIntervalMs must be an integer >= 100", {
+			field: "control.loopIntervalMs",
+			value: config.control.loopIntervalMs,
+		});
+	}
+
+	if (!Number.isInteger(config.control.idleThresholdMs) || config.control.idleThresholdMs < 0) {
+		throw new ValidationError("control.idleThresholdMs must be a non-negative integer", {
+			field: "control.idleThresholdMs",
+			value: config.control.idleThresholdMs,
+		});
+	}
+
+	if (!Number.isInteger(config.control.leaseMs) || config.control.leaseMs < 1) {
+		throw new ValidationError("control.leaseMs must be a positive integer", {
+			field: "control.leaseMs",
+			value: config.control.leaseMs,
+		});
+	}
+
+	if (!Number.isInteger(config.control.nudgeCooldownMs) || config.control.nudgeCooldownMs < 0) {
+		throw new ValidationError("control.nudgeCooldownMs must be a non-negative integer", {
+			field: "control.nudgeCooldownMs",
+			value: config.control.nudgeCooldownMs,
 		});
 	}
 }
