@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { OverstoryError } from "../errors";
 import type { AgentRuntime, OverstoryConfig } from "../types";
 import {
@@ -102,34 +105,56 @@ function makeConfig(overrides?: { codex?: OverstoryConfig["codex"] }): Overstory
 /**
  * resolveDriverForSession and resolveDriverForSpawn use dynamic imports that
  * pull in modules depending on bundled-defs.ts (a generated file not present
- * in the worktree). We test the full factory path for codex-daemon (which
- * throws before any dynamic import), and test the runtime resolution + driver
- * name contract via direct driver instantiation for claude and codex runtimes.
+ * in the worktree). We test the full factory path for codex-daemon (which does
+ * not need bundled-defs), and test the runtime resolution + driver name contract
+ * via direct driver instantiation for claude and codex runtimes.
  */
-describe("resolveDriverForSession — codex-daemon stub", () => {
-	test("throws OverstoryError for runtime 'codex-daemon' (not yet implemented)", async () => {
-		await expect(resolveDriverForSession("codex-daemon", makeConfig())).rejects.toBeInstanceOf(
-			OverstoryError,
-		);
-	});
-
-	test("thrown error for 'codex-daemon' has NOT_IMPLEMENTED code", async () => {
+describe("resolveDriverForSession — codex-daemon", () => {
+	test("throws DAEMON_NOT_RUNNING when daemon.json does not exist", async () => {
+		const config = makeConfig();
+		// /tmp/test-project/.overstory/daemon.json does not exist
 		try {
-			await resolveDriverForSession("codex-daemon", makeConfig());
+			await resolveDriverForSession("codex-daemon", config);
 			throw new Error("Expected error to be thrown");
 		} catch (err) {
 			expect(err).toBeInstanceOf(OverstoryError);
-			expect((err as OverstoryError).code).toBe("NOT_IMPLEMENTED");
+			expect((err as OverstoryError).code).toBe("DAEMON_NOT_RUNNING");
+		}
+	});
+
+	test("returns CodexDaemonDriver when daemon.json is valid", async () => {
+		const tmpDir = mkdtempSync(join(tmpdir(), "overstory-resolve-test-"));
+		const overstoryDir = join(tmpDir, ".overstory");
+		mkdirSync(overstoryDir);
+		writeFileSync(
+			join(overstoryDir, "daemon.json"),
+			JSON.stringify({
+				pid: process.pid,
+				port: 21817,
+				startedAt: new Date().toISOString(),
+				url: "http://127.0.0.1:21817",
+				token: "test-resolve-token",
+			}),
+		);
+		try {
+			const config: OverstoryConfig = {
+				...makeConfig(),
+				project: { name: "test-project", root: tmpDir, canonicalBranch: "main" },
+			};
+			const driver = await resolveDriverForSession("codex-daemon", config);
+			expect(driver.name).toBe("codex-daemon");
+		} finally {
+			rmSync(tmpDir, { recursive: true, force: true });
 		}
 	});
 });
 
 describe("resolveDriverForSpawn — runtime resolution", () => {
 	// These tests validate that resolveDriverForSpawn correctly delegates runtime
-	// resolution to resolveRuntimeForSpawn. Driver construction is exercised by
-	// the codex-daemon case (throws before any dynamic import).
+	// resolution to resolveRuntimeForSpawn. The codex-daemon cases exercise the
+	// full factory path (reads daemon.json; throws DAEMON_NOT_RUNNING if absent).
 
-	test("codex-daemon stub: throws NOT_IMPLEMENTED for codex + intraProcess=true", async () => {
+	test("codex + intraProcess=true resolves to codex-daemon, throws DAEMON_NOT_RUNNING when no daemon", async () => {
 		const config = makeConfig({
 			codex: {
 				enabled: true,
@@ -143,13 +168,23 @@ describe("resolveDriverForSpawn — runtime resolution", () => {
 				daemonPort: 0,
 			},
 		});
-		await expect(resolveDriverForSpawn("builder", config)).rejects.toBeInstanceOf(OverstoryError);
+		try {
+			await resolveDriverForSpawn("builder", config);
+			throw new Error("Expected error to be thrown");
+		} catch (err) {
+			expect(err).toBeInstanceOf(OverstoryError);
+			expect((err as OverstoryError).code).toBe("DAEMON_NOT_RUNNING");
+		}
 	});
 
-	test("codex-daemon stub: explicit codex-daemon runtimeFlag throws NOT_IMPLEMENTED", async () => {
-		await expect(
-			resolveDriverForSpawn("builder", makeConfig(), "codex-daemon"),
-		).rejects.toBeInstanceOf(OverstoryError);
+	test("explicit codex-daemon runtimeFlag throws DAEMON_NOT_RUNNING when no daemon", async () => {
+		try {
+			await resolveDriverForSpawn("builder", makeConfig(), "codex-daemon");
+			throw new Error("Expected error to be thrown");
+		} catch (err) {
+			expect(err).toBeInstanceOf(OverstoryError);
+			expect((err as OverstoryError).code).toBe("DAEMON_NOT_RUNNING");
+		}
 	});
 
 	test("resolveRuntimeForSpawn is used: no codex config defaults to 'claude'", () => {

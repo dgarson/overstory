@@ -94,7 +94,8 @@ export function evaluateDaemonHealth(
 		lastActivity: session.lastActivity,
 		state: "working",
 		action: "none",
-		reconciliationNote: "codex-daemon: tmux health skipped — daemon health is opaque pending Task 14",
+		reconciliationNote:
+			"codex-daemon: tmux health skipped — daemon health is opaque pending Task 14",
 	};
 }
 

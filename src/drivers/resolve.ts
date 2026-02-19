@@ -96,10 +96,20 @@ export async function resolveDriverForSession(
 			const overstoryDir = join(config.project.root, ".overstory");
 			return new CodexBridgeDriver(deps, overstoryDir);
 		}
-		case "codex-daemon":
-			throw new OverstoryError(
-				"CodexDaemonDriver is not yet implemented (Task 13)",
-				"NOT_IMPLEMENTED",
-			);
+		case "codex-daemon": {
+			const [{ CodexDaemonDriver }, { readDaemonStateSync }] = await Promise.all([
+				import("./codex-daemon.ts"),
+				import("../codex/daemon/lifecycle.ts"),
+			]);
+			const overstoryDir = join(config.project.root, ".overstory");
+			const state = readDaemonStateSync(overstoryDir);
+			if (!state) {
+				throw new OverstoryError(
+					"Codex daemon is not running — start it with 'overstory daemon start'",
+					"DAEMON_NOT_RUNNING",
+				);
+			}
+			return new CodexDaemonDriver({ daemonUrl: state.url, token: state.token });
+		}
 	}
 }
