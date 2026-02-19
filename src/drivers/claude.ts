@@ -67,6 +67,12 @@ export interface ClaudeDriverDeps {
 	 * Signature matches agents/hooks-deployer.ts#deployHooks.
 	 */
 	deployHooks: (worktreePath: string, agentName: string, capability?: string) => Promise<void>;
+
+	/**
+	 * Kill a tmux session by name.
+	 * Optional — if absent, the driver calls `tmux kill-session` directly via Bun.spawn.
+	 */
+	killSession?: (session: string) => Promise<void>;
 }
 
 /**
@@ -80,6 +86,13 @@ const BEACON_PRE_DELAY_MS = 3_000;
  * Matches sling.ts line 603 (overstory-yhv6 workaround).
  */
 const BEACON_POST_DELAY_MS = 500;
+
+/**
+ * Delay between nudge message send-keys and follow-up Enter.
+ * Same value as BEACON_POST_DELAY_MS but semantically distinct — this is
+ * for nudge delivery, not beacon startup.
+ */
+const NUDGE_ENTER_DELAY_MS = 500;
 
 /**
  * Number of send-keys retries for nudge delivery.
@@ -108,7 +121,7 @@ async function sendWithRetry(
 		try {
 			await sendKeys(session, message);
 			// Follow-up Enter to ensure submission (overstory-t62v / overstory-yhv6).
-			await Bun.sleep(BEACON_POST_DELAY_MS);
+			await Bun.sleep(NUDGE_ENTER_DELAY_MS);
 			await sendKeys(session, "");
 			return true;
 		} catch {
@@ -253,9 +266,15 @@ export class ClaudeDriver implements AgentDriver {
 	/**
 	 * Request graceful shutdown of a Claude Code agent by killing its tmux session.
 	 *
-	 * Uses tmux kill-session. No-op if the session doesn't exist.
+	 * Uses the injected killSession dep if provided (for testability), otherwise
+	 * falls back to calling `tmux kill-session` directly via Bun.spawn.
+	 * No-op if the session doesn't exist.
 	 */
 	async shutdown(agentName: string): Promise<void> {
+		if (this.deps.killSession) {
+			await this.deps.killSession(agentName);
+			return;
+		}
 		try {
 			const proc = Bun.spawn(["tmux", "kill-session", "-t", agentName], {
 				stdout: "pipe",
@@ -295,5 +314,16 @@ export async function createClaudeDriver(): Promise<ClaudeDriver> {
 		isSessionAlive,
 		writeOverlay,
 		deployHooks,
+		killSession: async (session: string) => {
+			try {
+				const proc = Bun.spawn(["tmux", "kill-session", "-t", session], {
+					stdout: "pipe",
+					stderr: "pipe",
+				});
+				await proc.exited;
+			} catch {
+				// Best-effort: session may already be gone
+			}
+		},
 	});
 }

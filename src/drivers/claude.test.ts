@@ -230,7 +230,7 @@ describe("ClaudeDriver", () => {
 		expect(nonEmpty[0]).toContain("check your mail");
 	});
 
-	test("nudge skips session alive check when opts.force is true", async () => {
+	test("nudge still checks session liveness when opts.force is true", async () => {
 		let aliveChecked = false;
 		const driver = new ClaudeDriver(
 			makeDeps({
@@ -278,6 +278,18 @@ describe("ClaudeDriver", () => {
 	test("shutdown does not throw", async () => {
 		const driver = new ClaudeDriver(makeDeps());
 		await expect(driver.shutdown("test-agent")).resolves.toBeUndefined();
+	});
+
+	test("shutdown calls killSession dep", async () => {
+		let killedSession = "";
+		const deps = makeDeps({
+			killSession: async (s) => {
+				killedSession = s;
+			},
+		});
+		const driver = new ClaudeDriver(deps);
+		await driver.shutdown("my-agent");
+		expect(killedSession).toBe("my-agent");
 	});
 
 	test("close does not throw", async () => {
