@@ -13,7 +13,7 @@
  * 9. Deploy hooks config
  * 10. Claim beads issue
  * 11. Create agent identity
- * 12. Create tmux session running claude
+ * 12. Driver.spawn() — runtime-specific: overlay, hooks, process, beacon
  * 13. Record session in SessionStore + increment run agent count
  * 14. Return AgentSession
  */
@@ -71,25 +71,6 @@ function getFlag(args: string[], flag: string): string | undefined {
 		return undefined;
 	}
 	return args[idx + 1];
-}
-
-/**
- * Resolve the execution runtime for an agent spawn.
- *
- * Priority order:
- *   1. Explicit --runtime flag value (from CLI args)
- *   2. Per-capability default from config.codex.defaultRuntime
- *   3. Hard default: "claude"
- *
- * @param runtimeFlag - The value of the --runtime CLI flag, if provided
- * @param capabilityDefault - The per-capability default from config (may be undefined)
- * @returns The resolved AgentRuntime
- */
-export function resolveRuntime(
-	runtimeFlag: AgentRuntime | undefined,
-	capabilityDefault: AgentRuntime | undefined,
-): AgentRuntime {
-	return runtimeFlag ?? capabilityDefault ?? "claude";
 }
 
 /**
@@ -420,92 +401,101 @@ export async function slingCommand(args: string[]): Promise<void> {
 			mulchExpertise,
 		};
 
-		// Steps 8b–12 are wrapped in a try/catch so that any failure cleans up
-		// the worktree created in step 7. Without this, a failure in overlay
-		// writing, hooks deployment, Codex config, server start, or tmux session
-		// creation leaves an orphaned worktree on disk (review issue U5).
+		// Steps 10–12 are wrapped in a try/catch so that any failure cleans up
+		// the worktree created in step 7. Without this, a failure in driver
+		// resolution or driver.spawn() leaves an orphaned worktree on disk (review issue U5).
 		const tmuxSessionName = `overstory-${config.project.name}-${name}`;
 		const sessionId = `session-${Date.now()}-${name}`;
 
-		// Resolve driver using two-path resolution — persists runtime on session.
-		// resolveRuntimeForSpawn handles: flag > per-capability config > "claude",
-		// and upgrades "codex" + intraProcess=true to "codex-daemon".
-		const { runtime, driver } = await resolveDriverForSpawn(capability, config, runtimeFlag);
-
-		// 10. Claim beads issue (shared step, before driver dispatch)
-		if (config.beads.enabled) {
-			try {
-				await beads.claim(taskId);
-			} catch {
-				// Non-fatal: issue may already be claimed
-			}
-		}
-
-		// 11. Create agent identity (if new)
-		const identityBaseDir = join(config.project.root, ".overstory", "agents");
-		const existingIdentity = await loadIdentity(identityBaseDir, name);
-		if (!existingIdentity) {
-			await createIdentity(identityBaseDir, {
-				name,
-				capability,
-				created: new Date().toISOString(),
-				sessionsCompleted: 0,
-				expertiseDomains: config.mulch.enabled ? config.mulch.domains : [],
-				recentTasks: [],
-			});
-		}
-
-		// 13. Record session BEFORE calling driver.spawn so that hook-triggered
-		// updateLastActivity() can find the entry and transition booting->working.
-		// Without this, a race exists: hooks fire before the session is persisted,
-		// leaving the agent stuck in "booting" (overstory-036f).
-		// pid starts as null; updated after driver.spawn returns the real pid.
-		// tmuxSession uses a sentinel "daemon:<agentName>" for codex-daemon to avoid
-		// schema migration (sessions.tmuxSession is NOT NULL).
-		const session: AgentSession = {
-			id: sessionId,
-			agentName: name,
-			capability,
-			worktreePath,
-			branchName,
-			beadId: taskId,
-			tmuxSession: runtime === "codex-daemon" ? `daemon:${name}` : tmuxSessionName,
-			state: "booting",
-			pid: null,
-			parentAgent: parentAgent,
-			depth,
-			runId,
-			startedAt: new Date().toISOString(),
-			lastActivity: new Date().toISOString(),
-			escalationLevel: 0,
-			stalledSince: null,
-			runtime,
-		};
-
-		store.upsert(session);
-
-		// Increment agent count for the run
-		const runStore = createRunStore(join(overstoryDir, "sessions.db"));
-		try {
-			runStore.incrementAgentCount(runId);
-		} finally {
-			runStore.close();
-		}
-
-		// Build the beacon text that the driver will send after the session starts.
-		// ClaudeDriver uses this; CodexBridgeDriver ignores it (bridge handles startup).
-		const beaconText = buildBeacon({
-			agentName: name,
-			capability,
-			taskId,
-			parentAgent,
-			depth,
-		});
-
-		// 12. Driver handles runtime-specific steps: overlay write, hooks deploy,
-		// process spawn, and beacon delivery.
+		// Resolve driver, create session, and spawn — all wrapped in a try/catch so
+		// that any failure (including driver resolution throwing NOT_IMPLEMENTED) cleans
+		// up the worktree created in step 7 (review issue U5).
+		let session: AgentSession | undefined;
+		let runtime: AgentRuntime = "claude"; // set by resolveDriverForSpawn inside try
 		let pid: number;
 		try {
+			// Resolve driver using two-path resolution — persists runtime on session.
+			// resolveRuntimeForSpawn handles: flag > per-capability config > "claude",
+			// and upgrades "codex" + intraProcess=true to "codex-daemon".
+			const { runtime: resolvedRuntime, driver } = await resolveDriverForSpawn(
+				capability,
+				config,
+				runtimeFlag,
+			);
+			runtime = resolvedRuntime;
+
+			// 10. Claim beads issue (shared step, before driver dispatch)
+			if (config.beads.enabled) {
+				try {
+					await beads.claim(taskId);
+				} catch {
+					// Non-fatal: issue may already be claimed
+				}
+			}
+
+			// 11. Create agent identity (if new)
+			const identityBaseDir = join(config.project.root, ".overstory", "agents");
+			const existingIdentity = await loadIdentity(identityBaseDir, name);
+			if (!existingIdentity) {
+				await createIdentity(identityBaseDir, {
+					name,
+					capability,
+					created: new Date().toISOString(),
+					sessionsCompleted: 0,
+					expertiseDomains: config.mulch.enabled ? config.mulch.domains : [],
+					recentTasks: [],
+				});
+			}
+
+			// 13. Record session BEFORE calling driver.spawn so that hook-triggered
+			// updateLastActivity() can find the entry and transition booting->working.
+			// Without this, a race exists: hooks fire before the session is persisted,
+			// leaving the agent stuck in "booting" (overstory-036f).
+			// pid starts as null; updated after driver.spawn returns the real pid.
+			// tmuxSession uses a sentinel "daemon:<agentName>" for codex-daemon to avoid
+			// schema migration (sessions.tmuxSession is NOT NULL).
+			session = {
+				id: sessionId,
+				agentName: name,
+				capability,
+				worktreePath,
+				branchName,
+				beadId: taskId,
+				tmuxSession: runtime === "codex-daemon" ? `daemon:${name}` : tmuxSessionName,
+				state: "booting",
+				pid: null,
+				parentAgent: parentAgent,
+				depth,
+				runId,
+				startedAt: new Date().toISOString(),
+				lastActivity: new Date().toISOString(),
+				escalationLevel: 0,
+				stalledSince: null,
+				runtime,
+			};
+
+			store.upsert(session);
+
+			// Increment agent count for the run
+			const runStore = createRunStore(join(overstoryDir, "sessions.db"));
+			try {
+				runStore.incrementAgentCount(runId);
+			} finally {
+				runStore.close();
+			}
+
+			// Build the beacon text that the driver will send after the session starts.
+			// ClaudeDriver uses this; CodexBridgeDriver ignores it (bridge handles startup).
+			const beaconText = buildBeacon({
+				agentName: name,
+				capability,
+				taskId,
+				parentAgent,
+				depth,
+			});
+
+			// 12. Driver handles runtime-specific steps: overlay write, hooks deploy,
+			// process spawn, and beacon delivery.
 			const result = await driver.spawn({
 				config,
 				session,
@@ -519,6 +509,14 @@ export async function slingCommand(args: string[]): Promise<void> {
 			});
 			pid = result.pid;
 		} catch (err) {
+			// Mark orphaned session as zombie before filesystem cleanup (Fix 3)
+			if (session !== undefined) {
+				try {
+					store.upsert({ ...session, state: "zombie" });
+				} catch {
+					// Best-effort
+				}
+			}
 			// Clean up the orphaned worktree created in step 7 (overstory-p4st, review U5)
 			try {
 				const cleanupProc = Bun.spawn(["git", "worktree", "remove", "--force", worktreePath], {
