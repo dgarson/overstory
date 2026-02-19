@@ -77,9 +77,8 @@ describe("DaemonServer", () => {
 		server = createDaemonServer({ port: 0, pool, token: TOKEN });
 		const res = await fetch(`${server.url}health`);
 		expect(res.status).toBe(200);
-		const body = (await res.json()) as { status: string; agents: number };
-		expect(body.status).toBe("ok");
-		expect(body.agents).toBe(0);
+		const body: unknown = await res.json();
+		expect(body).toMatchObject({ status: "ok", agents: 0 });
 	});
 
 	test("POST /agents returns 401 without bearer token", async () => {
@@ -113,8 +112,7 @@ describe("DaemonServer", () => {
 		server = createDaemonServer({ port: 0, pool, token: TOKEN });
 		const res = await fetch(`${server.url}agents`);
 		expect(res.status).toBe(200);
-		const body = (await res.json()) as unknown[];
-		expect(Array.isArray(body)).toBe(true);
+		const body: unknown = await res.json();
 		expect(body).toEqual([]);
 	});
 
@@ -130,8 +128,8 @@ describe("DaemonServer", () => {
 			body: JSON.stringify({ message: "check mail", force: true }),
 		});
 		expect(res.status).toBe(200);
-		const body = (await res.json()) as { delivered: boolean };
-		expect(body.delivered).toBe(true);
+		const body: unknown = await res.json();
+		expect(body).toMatchObject({ delivered: true });
 	});
 
 	test("POST /shutdown drains pool and stops", async () => {
@@ -164,6 +162,63 @@ describe("DaemonServer", () => {
 	test("GET /unknown-route returns 404", async () => {
 		server = createDaemonServer({ port: 0, pool: mockPool(), token: TOKEN });
 		const res = await fetch(`${server.url}unknown`);
+		expect(res.status).toBe(404);
+	});
+
+	test("POST /agents/:name/steer returns delivered result", async () => {
+		const pool = mockPool();
+		server = createDaemonServer({ port: 0, pool, token: TOKEN });
+		const res = await fetch(`${server.url}agents/test-agent/steer`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${TOKEN}`,
+			},
+			body: JSON.stringify({ input: "continue working" }),
+		});
+		expect(res.status).toBe(200);
+		const body: unknown = await res.json();
+		expect(body).toMatchObject({ delivered: true });
+	});
+
+	test("POST /agents/:name/steer returns 401 without auth", async () => {
+		server = createDaemonServer({ port: 0, pool: mockPool(), token: TOKEN });
+		const res = await fetch(`${server.url}agents/test-agent/steer`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ input: "continue" }),
+		});
+		expect(res.status).toBe(401);
+	});
+
+	test("DELETE /agents/:name returns 204", async () => {
+		server = createDaemonServer({ port: 0, pool: mockPool(), token: TOKEN });
+		const res = await fetch(`${server.url}agents/test-agent`, {
+			method: "DELETE",
+			headers: { Authorization: `Bearer ${TOKEN}` },
+		});
+		expect(res.status).toBe(204);
+	});
+
+	test("DELETE /agents/:name returns 401 without auth", async () => {
+		server = createDaemonServer({ port: 0, pool: mockPool(), token: TOKEN });
+		const res = await fetch(`${server.url}agents/test-agent`, { method: "DELETE" });
+		expect(res.status).toBe(401);
+	});
+
+	test("POST /agents/:name/nudge returns 401 without auth", async () => {
+		server = createDaemonServer({ port: 0, pool: mockPool(), token: TOKEN });
+		const res = await fetch(`${server.url}agents/test-agent/nudge`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ message: "check mail" }),
+		});
+		expect(res.status).toBe(401);
+	});
+
+	test("GET /agents/:name returns 404 for agent not in pool", async () => {
+		server = createDaemonServer({ port: 0, pool: mockPool(), token: TOKEN });
+		const res = await fetch(`${server.url}agents/some-agent`);
 		expect(res.status).toBe(404);
 	});
 });

@@ -57,7 +57,16 @@ export function createDaemonServer(opts: DaemonServerOpts): ReturnType<typeof Bu
 			if (url.pathname === "/agents" && method === "POST") {
 				const authErr = requireAuth(req);
 				if (authErr) return authErr;
-				const config = (await req.json()) as BridgeConfig;
+				const raw: unknown = await req.json();
+				if (
+					typeof raw !== "object" ||
+					raw === null ||
+					!("agentName" in raw) ||
+					typeof (raw as Record<string, unknown>).agentName !== "string"
+				) {
+					return new Response("Bad Request", { status: 400 });
+				}
+				const config = raw as BridgeConfig;
 				await pool.add(config);
 				return new Response(null, { status: 201 });
 			}
@@ -69,7 +78,16 @@ export function createDaemonServer(opts: DaemonServerOpts): ReturnType<typeof Bu
 				if (authErr) return authErr;
 				const agentName = nudgeMatch[1];
 				if (!agentName) return new Response("Not Found", { status: 404 });
-				const body = (await req.json()) as { message: string; force?: boolean };
+				const raw: unknown = await req.json();
+				if (
+					typeof raw !== "object" ||
+					raw === null ||
+					!("message" in raw) ||
+					typeof (raw as Record<string, unknown>).message !== "string"
+				) {
+					return new Response("Bad Request", { status: 400 });
+				}
+				const body = raw as { message: string; force?: boolean };
 				const result = await pool.nudge(agentName, body.message, body.force);
 				return Response.json(result);
 			}
@@ -81,7 +99,16 @@ export function createDaemonServer(opts: DaemonServerOpts): ReturnType<typeof Bu
 				if (authErr) return authErr;
 				const agentName = steerMatch[1];
 				if (!agentName) return new Response("Not Found", { status: 404 });
-				const body = (await req.json()) as { input: string };
+				const raw: unknown = await req.json();
+				if (
+					typeof raw !== "object" ||
+					raw === null ||
+					!("input" in raw) ||
+					typeof (raw as Record<string, unknown>).input !== "string"
+				) {
+					return new Response("Bad Request", { status: 400 });
+				}
+				const body = raw as { input: string };
 				const delivered = await pool.steer(agentName, body.input);
 				return Response.json({ delivered });
 			}
