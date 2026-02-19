@@ -5,8 +5,8 @@
  * tmux send-keys. Used to notify agents of new mail or relay urgent
  * instructions mid-conversation.
  *
- * For Codex agents (runtime === "codex"), sends a high-priority mail
- * message and wakes the bridge process via SIGUSR1 instead of tmux.
+ * For Codex agents (runtime === "codex"), delegates to CodexBridgeDriver.nudge()
+ * which sends high-priority mail and wakes the bridge via SIGUSR1.
  *
  * Includes debounce (500ms) to prevent rapid-fire nudges to the same agent.
  * Retry logic lives inside each driver implementation.
@@ -259,7 +259,9 @@ export async function nudgeAgent(
 		const { createMailClient } = await import("../mail/client.ts");
 		const driver = new CodexBridgeDriver(
 			{
-				// Nudge-only deps: sendMail, getBridgePid, processKill
+				// Cannot use makeCodexBridgeDriverDeps() here — it transitively imports
+				// codex/overlay.ts → bundled-defs.ts (a generated artifact that may not exist
+				// during tests or the nudge-only code path). Construct minimal deps inline.
 				sendMail: (mailDbPath, opts) => {
 					const store = createMailStore(mailDbPath);
 					const client = createMailClient(store);
