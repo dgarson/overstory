@@ -62,6 +62,10 @@ describe("runBridge integration", () => {
 			approvalTimeoutMs: 5000,
 			fileScope: ["src/foo.ts"],
 			projectRoot: tempDir,
+			// Use 0 reconnect attempts in integration tests so closing the mock
+			// server triggers immediate exit rather than reconnect retries.
+			maxReconnectAttempts: 0,
+			reconnectBaseDelayMs: 100,
 			...overrides,
 		};
 	}

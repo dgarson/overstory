@@ -461,3 +461,33 @@ export async function createRpcClient(
 		},
 	};
 }
+
+/**
+ * Attempt to connect to the RPC server with exponential backoff.
+ *
+ * Retries up to `maxAttempts` times (default 3). Between attempts, waits
+ * `baseDelayMs * 2^attempt` milliseconds (default base: 2000ms).
+ * Throws the last error if all attempts fail.
+ */
+export async function createRpcClientWithRetry(
+	url: string,
+	opts?: { timeoutMs?: number; maxAttempts?: number; baseDelayMs?: number },
+): Promise<RpcClient> {
+	const maxAttempts = opts?.maxAttempts ?? 3;
+	const baseDelayMs = opts?.baseDelayMs ?? 2000;
+	let lastError: Error = new Error("No attempts made");
+
+	for (let attempt = 0; attempt < maxAttempts; attempt++) {
+		if (attempt > 0) {
+			const delayMs = baseDelayMs * 2 ** (attempt - 1);
+			await Bun.sleep(delayMs);
+		}
+		try {
+			return await createRpcClient(url, { timeoutMs: opts?.timeoutMs });
+		} catch (err) {
+			lastError = err instanceof Error ? err : new Error(String(err));
+		}
+	}
+
+	throw lastError;
+}

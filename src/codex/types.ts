@@ -155,6 +155,8 @@ export interface BridgeConfig {
 	approvalTimeoutMs: number;
 	fileScope: string[];
 	projectRoot: string;
+	maxReconnectAttempts: number;
+	reconnectBaseDelayMs: number;
 }
 
 /** Server state file (.overstory/codex-server.json) */

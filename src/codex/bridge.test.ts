@@ -14,10 +14,12 @@ import { createRunStore, createSessionStore } from "../sessions/store";
 import type { AgentIdentity } from "../types";
 import {
 	buildInitialPrompt,
+	buildReconnectPrompt,
 	matchesEscalationReply,
 	parseBridgeConfig,
 	performShutdownBookkeeping,
 	type ShutdownDeps,
+	shouldAttemptReconnect,
 	shouldSaveCheckpoint,
 	shouldShutdown,
 } from "./bridge";
@@ -79,6 +81,18 @@ describe("parseBridgeConfig", () => {
 		expect(config.parentAgent).toBeNull();
 		expect(config.runId).toBeNull();
 		expect(config.depth).toBe(0);
+		expect(config.maxReconnectAttempts).toBe(3);
+		expect(config.reconnectBaseDelayMs).toBe(2000);
+	});
+
+	test("parses reconnect config from env vars", () => {
+		const env = {
+			OVERSTORY_MAX_RECONNECT_ATTEMPTS: "5",
+			OVERSTORY_RECONNECT_BASE_DELAY: "1000",
+		};
+		const config = parseBridgeConfig(env);
+		expect(config.maxReconnectAttempts).toBe(5);
+		expect(config.reconnectBaseDelayMs).toBe(1000);
 	});
 
 	test("parses empty file scope as empty array", () => {
@@ -136,6 +150,8 @@ function makeTestConfig(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
 		approvalTimeoutMs: 60000,
 		fileScope: ["src/foo.ts"],
 		projectRoot: "/tmp/test-project",
+		maxReconnectAttempts: 3,
+		reconnectBaseDelayMs: 2000,
 		...overrides,
 	};
 }
@@ -931,5 +947,296 @@ describe("performShutdownBookkeeping", () => {
 
 		deps.eventStore.close();
 		deps.mailClient.close();
+	});
+
+	// ---- Step 8: server auto-cleanup ----
+
+	test("calls stopServer when this is the last codex agent", async () => {
+		const overstoryDir = await setupOverstoryDir();
+		// Create a codex session for the current agent (will be "completed" by step 2)
+		createTestSession(overstoryDir);
+		const config = makeTestConfig({ projectRoot: tempDir });
+
+		let stopServerCalled = false;
+		const deps = await makeRealDeps(overstoryDir, {
+			stopServer: async () => {
+				stopServerCalled = true;
+				return true;
+			},
+		});
+
+		await performShutdownBookkeeping(config, overstoryDir, deps);
+
+		// No other codex agents — server should have been stopped
+		expect(stopServerCalled).toBe(true);
+
+		deps.eventStore.close();
+		deps.mailClient.close();
+	});
+
+	test("does NOT call stopServer when another codex agent is still active", async () => {
+		const overstoryDir = await setupOverstoryDir();
+		// Create session for the current agent
+		createTestSession(overstoryDir);
+
+		// Create a second active codex session
+		const store = createSessionStore(join(overstoryDir, "sessions.db"));
+		store.upsert({
+			id: "sess-other",
+			agentName: "other-codex-agent",
+			capability: "builder",
+			worktreePath: "/tmp/other-worktree",
+			branchName: "overstory/other-codex-agent/task-2",
+			beadId: "task-2",
+			tmuxSession: "overstory-test-fake",
+			state: "working",
+			pid: null,
+			parentAgent: "lead-1",
+			depth: 2,
+			runId: "run-1",
+			startedAt: new Date().toISOString(),
+			lastActivity: new Date().toISOString(),
+			escalationLevel: 0,
+			stalledSince: null,
+			runtime: "codex",
+		});
+		store.close();
+
+		const config = makeTestConfig({ projectRoot: tempDir });
+
+		let stopServerCalled = false;
+		const deps = await makeRealDeps(overstoryDir, {
+			stopServer: async () => {
+				stopServerCalled = true;
+				return true;
+			},
+		});
+
+		await performShutdownBookkeeping(config, overstoryDir, deps);
+
+		// Another codex agent is still active — server should NOT be stopped
+		expect(stopServerCalled).toBe(false);
+
+		deps.eventStore.close();
+		deps.mailClient.close();
+	});
+
+	test("does NOT call stopServer when stopServer is not provided", async () => {
+		const overstoryDir = await setupOverstoryDir();
+		createTestSession(overstoryDir);
+		const config = makeTestConfig({ projectRoot: tempDir });
+
+		// No stopServer in deps
+		const deps = await makeRealDeps(overstoryDir);
+
+		// Should not throw and should complete normally
+		await performShutdownBookkeeping(config, overstoryDir, deps);
+
+		deps.eventStore.close();
+		deps.mailClient.close();
+	});
+
+	test("step 8 is non-fatal: stopServer throwing does not block shutdown", async () => {
+		const overstoryDir = await setupOverstoryDir();
+		const config = makeTestConfig({ parentAgent: "lead-1", projectRoot: tempDir });
+
+		const deps = await makeRealDeps(overstoryDir, {
+			stopServer: async () => {
+				throw new Error("server stop failed");
+			},
+		});
+
+		// Should not throw
+		await performShutdownBookkeeping(config, overstoryDir, deps);
+
+		// Previous steps still ran (mail sent to parent)
+		const checkStore = createMailStore(join(overstoryDir, "mail.db"));
+		const messages = checkStore.getAll({ to: "lead-1" });
+		const workerDone = messages.find((m) => m.type === "worker_done");
+		expect(workerDone).toBeDefined();
+		checkStore.close();
+
+		deps.eventStore.close();
+		deps.mailClient.close();
+	});
+});
+
+// ========================================
+// shouldAttemptReconnect
+// ========================================
+
+describe("shouldAttemptReconnect", () => {
+	test("returns true when attempt is within limit and shutdown not requested", () => {
+		expect(shouldAttemptReconnect(false, 1, 3)).toBe(true);
+		expect(shouldAttemptReconnect(false, 2, 3)).toBe(true);
+		expect(shouldAttemptReconnect(false, 3, 3)).toBe(true); // at limit
+	});
+
+	test("returns false when attempt exceeds max", () => {
+		expect(shouldAttemptReconnect(false, 4, 3)).toBe(false);
+		expect(shouldAttemptReconnect(false, 10, 3)).toBe(false);
+	});
+
+	test("returns false when shutdownRequested is true regardless of attempt", () => {
+		expect(shouldAttemptReconnect(true, 1, 3)).toBe(false);
+		expect(shouldAttemptReconnect(true, 0, 10)).toBe(false);
+	});
+
+	test("returns false when maxAttempts is 0 and attempt is 1", () => {
+		expect(shouldAttemptReconnect(false, 1, 0)).toBe(false);
+	});
+
+	test("returns true for attempt 0 with any maxAttempts >= 0", () => {
+		// attempt=0 means still on the first connect, always within limit
+		expect(shouldAttemptReconnect(false, 0, 0)).toBe(true);
+		expect(shouldAttemptReconnect(false, 0, 3)).toBe(true);
+	});
+
+	test("works with maxAttempts=1: allows exactly one reconnect", () => {
+		expect(shouldAttemptReconnect(false, 1, 1)).toBe(true); // first reconnect allowed
+		expect(shouldAttemptReconnect(false, 2, 1)).toBe(false); // second blocked
+	});
+});
+
+// ========================================
+// buildReconnectPrompt
+// ========================================
+
+describe("buildReconnectPrompt", () => {
+	let tempDir: string;
+
+	beforeEach(async () => {
+		tempDir = await mkdtemp(join(tmpdir(), "bridge-reconnect-prompt-test-"));
+	});
+
+	afterEach(async () => {
+		await rm(tempDir, { recursive: true, force: true });
+	});
+
+	test("includes OVERSTORY RECONNECT header with agent name and task", async () => {
+		const config = makeTestConfig({ projectRoot: tempDir });
+		const overstoryDir = join(tempDir, ".overstory");
+		const { mkdir } = await import("node:fs/promises");
+		await mkdir(overstoryDir, { recursive: true });
+
+		const prompt = await buildReconnectPrompt(config, overstoryDir, "");
+
+		expect(prompt).toContain("[OVERSTORY RECONNECT] test-builder (builder)");
+		expect(prompt).toContain("task:task-1");
+		expect(prompt).toContain("Codex App Server was restarted");
+	});
+
+	test("includes checkpoint data when checkpoint exists", async () => {
+		const config = makeTestConfig({ projectRoot: tempDir });
+		const overstoryDir = join(tempDir, ".overstory");
+		const agentsDir = join(overstoryDir, "agents");
+		const { mkdir } = await import("node:fs/promises");
+		await mkdir(agentsDir, { recursive: true });
+
+		await saveCheckpoint(agentsDir, {
+			agentName: "test-builder",
+			beadId: "task-1",
+			sessionId: "sess-old",
+			timestamp: new Date().toISOString(),
+			progressSummary: "Halfway through the implementation",
+			filesModified: ["src/foo.ts"],
+			currentBranch: "overstory/test-builder/task-1",
+			pendingWork: "Write tests",
+			mulchDomains: [],
+		});
+
+		const prompt = await buildReconnectPrompt(config, overstoryDir, "");
+
+		expect(prompt).toContain("## Session Recovery");
+		expect(prompt).toContain("Halfway through the implementation");
+		expect(prompt).toContain("src/foo.ts");
+		expect(prompt).toContain("Write tests");
+	});
+
+	test("falls back to prevProgressSummary when no checkpoint", async () => {
+		const config = makeTestConfig({ projectRoot: tempDir });
+		const overstoryDir = join(tempDir, ".overstory");
+		const { mkdir } = await import("node:fs/promises");
+		await mkdir(overstoryDir, { recursive: true });
+
+		const prompt = await buildReconnectPrompt(config, overstoryDir, "Last wrote src/foo.ts");
+
+		expect(prompt).toContain("Last wrote src/foo.ts");
+		expect(prompt).toContain("Continue working on task task-1");
+	});
+
+	test("falls back to minimal resume prompt when no checkpoint and no progress summary", async () => {
+		const config = makeTestConfig({ projectRoot: tempDir });
+		const overstoryDir = join(tempDir, ".overstory");
+		const { mkdir } = await import("node:fs/promises");
+		await mkdir(overstoryDir, { recursive: true });
+
+		const prompt = await buildReconnectPrompt(config, overstoryDir, "");
+
+		expect(prompt).toContain("Resume task task-1");
+		expect(prompt).toContain("continue from where you left off");
+	});
+
+	test("includes pending mail accumulated during disconnect", async () => {
+		const config = makeTestConfig({ projectRoot: tempDir });
+		const overstoryDir = join(tempDir, ".overstory");
+		const { mkdir } = await import("node:fs/promises");
+		await mkdir(overstoryDir, { recursive: true });
+
+		const mailStore = createMailStore(join(overstoryDir, "mail.db"));
+		const tempMail = createMailClient(mailStore);
+		tempMail.send({
+			from: "lead-1",
+			to: "test-builder",
+			subject: "Reconnect instructions",
+			body: "Continue the implementation",
+			type: "status",
+			priority: "normal",
+		});
+		tempMail.close();
+
+		const prompt = await buildReconnectPrompt(config, overstoryDir, "");
+
+		expect(prompt).toContain("## Pending Messages");
+		expect(prompt).toContain("[lead-1] Reconnect instructions");
+	});
+
+	test("omits mail section when no pending messages", async () => {
+		const config = makeTestConfig({ projectRoot: tempDir });
+		const overstoryDir = join(tempDir, ".overstory");
+		const { mkdir } = await import("node:fs/promises");
+		await mkdir(overstoryDir, { recursive: true });
+
+		const prompt = await buildReconnectPrompt(config, overstoryDir, "");
+
+		expect(prompt).not.toContain("Pending Messages");
+	});
+
+	test("checkpoint takes precedence over prevProgressSummary", async () => {
+		const config = makeTestConfig({ projectRoot: tempDir });
+		const overstoryDir = join(tempDir, ".overstory");
+		const agentsDir = join(overstoryDir, "agents");
+		const { mkdir } = await import("node:fs/promises");
+		await mkdir(agentsDir, { recursive: true });
+
+		await saveCheckpoint(agentsDir, {
+			agentName: "test-builder",
+			beadId: "task-1",
+			sessionId: "sess-old",
+			timestamp: new Date().toISOString(),
+			progressSummary: "From checkpoint",
+			filesModified: [],
+			currentBranch: "overstory/test-builder/task-1",
+			pendingWork: "Checkpoint work",
+			mulchDomains: [],
+		});
+
+		const prompt = await buildReconnectPrompt(config, overstoryDir, "From prevProgress");
+
+		// Checkpoint should win
+		expect(prompt).toContain("From checkpoint");
+		expect(prompt).toContain("## Session Recovery");
+		// prevProgressSummary fallback should NOT appear
+		expect(prompt).not.toContain("From prevProgress");
 	});
 });
