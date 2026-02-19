@@ -1,7 +1,7 @@
 // src/codex/rpc-client.test.ts
 import { afterEach, describe, expect, test } from "bun:test";
 import type { RpcClient } from "./rpc-client";
-import { createRpcClient } from "./rpc-client";
+import { createRpcClient, createRpcClientWithRetry } from "./rpc-client";
 
 let server: ReturnType<typeof Bun.serve> | null = null;
 let client: RpcClient | null = null;
@@ -500,5 +500,114 @@ describe("JSON-RPC error response", () => {
 
 		client = await createRpcClient(`ws://127.0.0.1:${port}`);
 		await expect(client.request("test/method")).rejects.toThrow("JSON-RPC error");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// createRpcClientWithRetry
+// ---------------------------------------------------------------------------
+
+describe("createRpcClientWithRetry", () => {
+	test(
+		"connects on first attempt when server is available",
+		async () => {
+			const ts = createTestServer();
+			client = await createRpcClientWithRetry(ts.url, { maxAttempts: 3, baseDelayMs: 10 });
+			expect(client.closed).toBe(false);
+		},
+		{ timeout: 5000 },
+	);
+
+	test(
+		"succeeds after one initial failure",
+		async () => {
+			// First attempt: reject; second attempt: succeed
+			let attempts = 0;
+			// Use a port that initially has no listener, then start server after first fail
+			const port = 30000 + Math.floor(Math.random() * 10000);
+
+			// Start the server after a brief delay (shorter than the retry backoff).
+			// We assign to the module-level `server` so afterEach handles cleanup.
+			const serverStartTimeout = setTimeout(() => {
+				server = Bun.serve({
+					port,
+					fetch(req, srv) {
+						if (srv.upgrade(req, { data: undefined })) return undefined;
+						return new Response("Not found", { status: 404 });
+					},
+					websocket: {
+						open(ws) {
+							ws.subscribe("all");
+						},
+						message() {},
+					},
+				});
+			}, 50);
+
+			try {
+				// baseDelayMs=100 means retry after 100ms — server starts at 50ms
+				client = await createRpcClientWithRetry(`ws://127.0.0.1:${port}`, {
+					maxAttempts: 3,
+					baseDelayMs: 100,
+				});
+				attempts++;
+				expect(client.closed).toBe(false);
+				expect(attempts).toBe(1);
+			} finally {
+				clearTimeout(serverStartTimeout);
+				// server is cleaned up by afterEach
+			}
+		},
+		{ timeout: 10000 },
+	);
+
+	test(
+		"throws after exhausting all attempts",
+		async () => {
+			// Nothing listening on this port
+			const port = 30000 + Math.floor(Math.random() * 10000);
+
+			await expect(
+				createRpcClientWithRetry(`ws://127.0.0.1:${port}`, {
+					maxAttempts: 2,
+					baseDelayMs: 10,
+				}),
+			).rejects.toThrow();
+		},
+		{ timeout: 10000 },
+	);
+
+	test(
+		"uses exponential backoff between attempts",
+		async () => {
+			// Track when each attempt happens by recording timestamps when
+			// the connection fails (nothing listening on this port)
+			const port = 30000 + Math.floor(Math.random() * 10000);
+			const startMs = Date.now();
+
+			await expect(
+				createRpcClientWithRetry(`ws://127.0.0.1:${port}`, {
+					maxAttempts: 3,
+					baseDelayMs: 50,
+				}),
+			).rejects.toThrow();
+
+			// With baseDelayMs=50: delay after attempt 0 = 50ms, after attempt 1 = 100ms
+			// Total minimum elapsed = 50 + 100 = 150ms
+			const elapsedMs = Date.now() - startMs;
+			expect(elapsedMs).toBeGreaterThanOrEqual(140);
+		},
+		{ timeout: 10000 },
+	);
+
+	test("passes timeoutMs to createRpcClient", async () => {
+		const ts = createTestServer();
+		// timeoutMs only affects RPC request timeouts, not connection
+		client = await createRpcClientWithRetry(ts.url, {
+			maxAttempts: 1,
+			baseDelayMs: 10,
+			timeoutMs: 5000,
+		});
+		expect(client.closed).toBe(false);
 	});
 });

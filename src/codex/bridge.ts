@@ -15,7 +15,9 @@ import type { EventLevel, EventStore, MailMessage, SessionCheckpoint } from "../
 import type { ApprovalContext } from "./approval";
 import { evaluateCommandApproval, evaluateFileChangeApproval } from "./approval";
 import { createDeltaBufferManager, normalizeItemCompleted, normalizeItemStarted } from "./events";
-import { createRpcClient } from "./rpc-client";
+import type { RpcClient } from "./rpc-client";
+import { createRpcClient, createRpcClientWithRetry } from "./rpc-client";
+import { stopServer } from "./server";
 import type {
 	ApprovalRequest,
 	BridgeConfig,
@@ -45,6 +47,8 @@ export function parseBridgeConfig(env: Record<string, string | undefined>): Brid
 		approvalTimeoutMs: Number(env.OVERSTORY_APPROVAL_TIMEOUT ?? "60000"),
 		fileScope: (env.OVERSTORY_FILE_SCOPE ?? "").split(",").filter(Boolean),
 		projectRoot: env.OVERSTORY_PROJECT_ROOT ?? "",
+		maxReconnectAttempts: Number(env.OVERSTORY_MAX_RECONNECT_ATTEMPTS ?? "3"),
+		reconnectBaseDelayMs: Number(env.OVERSTORY_RECONNECT_BASE_DELAY ?? "2000"),
 	};
 }
 
@@ -119,7 +123,11 @@ export interface ShutdownDeps {
 		close(): void;
 	};
 	openSessionStore: (dir: string) => {
-		store: { updateState(agent: string, state: string): void; close(): void };
+		store: {
+			updateState(agent: string, state: string): void;
+			getActive(): Array<{ runtime?: string; agentName: string }>;
+			close(): void;
+		};
 	};
 	updateIdentity: typeof updateIdentity;
 	saveCheckpoint?: typeof saveCheckpoint;
@@ -128,6 +136,8 @@ export interface ShutdownDeps {
 		completeRun(id: string, status: string): void;
 		close(): void;
 	};
+	/** Stop the Codex App Server. Called when this is the last codex agent. */
+	stopServer?: (overstoryDir: string) => Promise<boolean>;
 }
 
 /**
@@ -255,6 +265,26 @@ export async function performShutdownBookkeeping(
 			// Non-fatal: run completion should not break session-end handling
 		}
 	}
+
+	// 8. Stop Codex App Server when this is the last codex agent
+	if (deps.stopServer) {
+		try {
+			const { store: sessionStore } = deps.openSessionStore(overstoryDir);
+			try {
+				const active = sessionStore.getActive();
+				const otherCodex = active.filter(
+					(s) => s.runtime === "codex" && s.agentName !== config.agentName,
+				);
+				if (otherCodex.length === 0) {
+					await deps.stopServer(overstoryDir);
+				}
+			} finally {
+				sessionStore.close();
+			}
+		} catch {
+			// Non-fatal: server cleanup failure should not block shutdown
+		}
+	}
 }
 
 /** Safely insert an event into the event store (fire-and-forget) */
@@ -344,18 +374,116 @@ export async function buildInitialPrompt(
 	return sections.join("\n");
 }
 
-/**
- * Run the bridge process for a single worker agent.
- * Connects to the Codex App Server, starts a thread+turn, handles notifications,
- * and shuts down cleanly when the turn reaches a terminal state.
- */
-export async function runBridge(config: BridgeConfig): Promise<void> {
-	const overstoryDir = join(config.projectRoot, ".overstory");
-	const eventStore = createEventStore(join(overstoryDir, "events.db"));
-	const mailStore = createMailStore(join(overstoryDir, "mail.db"));
-	const mailClient = createMailClient(mailStore);
+/** Mutable refs shared between the outer reconnect loop and each bridge session. */
+interface BridgeSessionRefs {
+	rpc: RpcClient | null;
+	threadId: string | null;
+	activeTurnId: string | null;
+}
 
-	const rpc = await createRpcClient(config.serverUrl);
+/**
+ * Determine whether to attempt a server reconnect after an unexpected disconnect.
+ * Pure function: makes the reconnect decision testable without side effects.
+ *
+ * @param shutdownRequested - Whether shutdown was explicitly requested (prevents reconnect)
+ * @param attempt - Current reconnect attempt number (1-indexed)
+ * @param maxAttempts - Maximum number of reconnect attempts allowed
+ */
+export function shouldAttemptReconnect(
+	shutdownRequested: boolean,
+	attempt: number,
+	maxAttempts: number,
+): boolean {
+	if (shutdownRequested) return false;
+	return attempt <= maxAttempts;
+}
+
+/**
+ * Build a recovery prompt for a reconnected session.
+ * Called instead of buildInitialPrompt when the bridge reconnects after a server restart.
+ * Loads checkpoint data and pending mail to give the model full context.
+ */
+export async function buildReconnectPrompt(
+	config: BridgeConfig,
+	overstoryDir: string,
+	prevProgressSummary: string,
+): Promise<string> {
+	const sections: string[] = [];
+	const timestamp = new Date().toISOString();
+	sections.push(
+		`[OVERSTORY RECONNECT] ${config.agentName} (${config.capability}) ${timestamp} task:${config.beadId}`,
+	);
+	sections.push("The Codex App Server was restarted. You are continuing your previous session.");
+
+	// Try to load checkpoint for richer recovery context
+	const identityBaseDir = join(overstoryDir, "agents");
+	try {
+		const checkpoint = await loadCheckpoint(identityBaseDir, config.agentName);
+		if (checkpoint) {
+			sections.push("\n## Session Recovery");
+			sections.push(`**Progress so far:** ${checkpoint.progressSummary}`);
+			sections.push(`**Files modified:** ${checkpoint.filesModified.join(", ") || "none"}`);
+			sections.push(`**Pending work:** ${checkpoint.pendingWork}`);
+			sections.push(`**Branch:** ${checkpoint.currentBranch}`);
+		} else if (prevProgressSummary) {
+			sections.push(`\n**Last known progress:** ${prevProgressSummary}`);
+			sections.push(`Continue working on task ${config.beadId}.`);
+		} else {
+			sections.push(`\nResume task ${config.beadId} and continue working.`);
+			sections.push("Re-read your AGENTS.md overlay and continue from where you left off.");
+		}
+	} catch {
+		sections.push(`\nResume task ${config.beadId}. Continue working.`);
+	}
+
+	// Check for pending mail (accumulated during the disconnect)
+	try {
+		const mailStore = createMailStore(join(overstoryDir, "mail.db"));
+		const tempMailClient = createMailClient(mailStore);
+		try {
+			const messages = tempMailClient.check(config.agentName);
+			if (messages.length > 0) {
+				sections.push("\n## Pending Messages");
+				for (const m of messages) {
+					sections.push(`- [${m.from}] ${m.subject}: ${m.body.slice(0, 300)}`);
+				}
+			}
+		} finally {
+			tempMailClient.close();
+		}
+	} catch {
+		// Non-fatal: mail check failure shouldn't block reconnect
+	}
+
+	return sections.join("\n");
+}
+
+/**
+ * Run a single bridge session: connect, initialize, start thread+turn, handle events,
+ * and return whether the session ended normally (turn completed) or unexpectedly (socket closed).
+ *
+ * On reconnect (isReconnect=true), uses createRpcClientWithRetry and builds a recovery
+ * prompt instead of the full initial prompt.
+ */
+async function runBridgeSession(
+	config: BridgeConfig,
+	overstoryDir: string,
+	eventStore: EventStore,
+	mailClient: ReturnType<typeof createMailClient>,
+	modifiedFiles: Set<string>,
+	refs: BridgeSessionRefs,
+	isReconnect: boolean,
+	prevProgressSummary: string,
+): Promise<{ normalShutdown: boolean; lastProgressSummary: string }> {
+	// Connect — use retry on reconnect to give the server time to restart.
+	const rpc = isReconnect
+		? await createRpcClientWithRetry(config.serverUrl, {
+				maxAttempts: config.maxReconnectAttempts,
+				baseDelayMs: config.reconnectBaseDelayMs,
+			})
+		: await createRpcClient(config.serverUrl);
+
+	refs.rpc = rpc;
 
 	// Initialize the server session (clientInfo is required by Codex App Server)
 	await rpc.request("initialize", {
@@ -388,6 +516,7 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 	})) as ThreadStartResult;
 
 	const threadId = threadResult.thread.id;
+	refs.threadId = threadId;
 
 	// Delta buffer manager for accumulating streamed output per item
 	const deltaManager = createDeltaBufferManager(config.maxDeltaBufferBytes);
@@ -400,11 +529,10 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 
 	// Shutdown signal: Promise-based instead of polling
 	let shutdownRequested = false;
-	let shutdownResolve: (() => void) | null = null;
+	let shutdownResolve: ((normal: boolean) => void) | null = null;
 
-	// Compaction tracking: accumulate modified files for checkpoint building
-	const modifiedFiles = new Set<string>();
-	let lastProgressSummary = "";
+	// Compaction tracking: inherit progress summary from previous session
+	let lastProgressSummary = prevProgressSummary;
 	let lastCheckpointSaveMs = 0;
 	const CHECKPOINT_DEBOUNCE_MS = 30_000;
 
@@ -586,13 +714,14 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 			if (!p) return;
 
 			activeTurnId = null;
+			refs.activeTurnId = null;
 
 			// Extract status from v2 nested structure or flat v1 structure
 			const turnObj = p.turn as { status?: string } | undefined;
 			const status = turnObj?.status ?? (p as unknown as TurnCompletedParams).status;
 			if (status && shouldShutdown(status)) {
 				shutdownRequested = true;
-				shutdownResolve?.();
+				shutdownResolve?.(true);
 			}
 		}
 
@@ -606,6 +735,7 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 			const turnId = turnObj?.id ?? (p.turnId as string | undefined);
 			if (turnId) {
 				activeTurnId = turnId;
+				refs.activeTurnId = turnId;
 				// Check for messages that arrived between turns
 				debouncedMailCheck();
 			}
@@ -853,19 +983,22 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 		}
 	});
 
-	// Build rich priming prompt (mirrors Claude path's beacon + SessionStart hook)
-	const initialPrompt = await buildInitialPrompt(config, overstoryDir);
+	// Build prompt: initial on first connect, recovery on reconnect
+	const sessionPrompt = isReconnect
+		? await buildReconnectPrompt(config, overstoryDir, prevProgressSummary)
+		: await buildInitialPrompt(config, overstoryDir);
 
-	// Start the initial turn with the agent's task instructions.
+	// Start the turn with the agent's task instructions.
 	// The v2 API expects input as an array of UserInput objects.
 	const turnStartResult = (await rpc.request("turn/start", {
 		threadId,
-		input: [{ type: "text", text: initialPrompt, text_elements: [] }],
+		input: [{ type: "text", text: sessionPrompt, text_elements: [] }],
 	})) as { turn?: { id: string } } | undefined;
 
 	// Capture initial turn ID if returned synchronously
 	if (turnStartResult?.turn?.id !== undefined) {
 		activeTurnId = turnStartResult.turn.id;
+		refs.activeTurnId = activeTurnId;
 	}
 
 	// Transition from "booting" to "working" now that the turn has started.
@@ -882,6 +1015,53 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 		// Non-fatal: state transition failure shouldn't block the bridge
 	}
 
+	// Event loop: wait for shutdown signal (Promise-based instead of polling).
+	// Resolves with true on normal shutdown (turn completed), false on unexpected disconnect.
+	const normalShutdown = await new Promise<boolean>((resolveShutdown) => {
+		shutdownResolve = (normal: boolean) => resolveShutdown(normal);
+		// If already requested before we set the resolve, fire immediately
+		if (shutdownRequested) {
+			resolveShutdown(true);
+			return;
+		}
+		// Poll for WebSocket disconnection (rpc.closed set by close handler)
+		const disconnectCheck = setInterval(() => {
+			if (rpc.closed) {
+				clearInterval(disconnectCheck);
+				console.error("[bridge] WebSocket disconnected unexpectedly");
+				resolveShutdown(false);
+			}
+		}, 1000);
+		// Clean up interval when shutdown resolves
+		const origResolve = shutdownResolve;
+		shutdownResolve = (normal: boolean) => {
+			clearInterval(disconnectCheck);
+			origResolve?.(normal);
+		};
+	});
+
+	// Clear session refs
+	refs.rpc = null;
+	refs.activeTurnId = null;
+	rpc.close();
+
+	return { normalShutdown, lastProgressSummary };
+}
+
+/**
+ * Run the bridge process for a single worker agent.
+ * Owns long-lived resources (event store, mail client) and the reconnect loop.
+ * Delegates per-session work (connect, thread, event loop) to runBridgeSession().
+ */
+export async function runBridge(config: BridgeConfig): Promise<void> {
+	const overstoryDir = join(config.projectRoot, ".overstory");
+	const eventStore = createEventStore(join(overstoryDir, "events.db"));
+	const mailStore = createMailStore(join(overstoryDir, "mail.db"));
+	const mailClient = createMailClient(mailStore);
+
+	const modifiedFiles = new Set<string>();
+	const refs: BridgeSessionRefs = { rpc: null, threadId: null, activeTurnId: null };
+
 	// Write PID file so nudge can find the bridge process directly
 	const pidFilePath = join(overstoryDir, "agents", config.agentName, "bridge.pid");
 	try {
@@ -891,21 +1071,22 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 		// Non-fatal: nudge will fall back to session PID
 	}
 
-	// SIGUSR1 handler: check mail and steer the active turn if there are messages
+	// SIGUSR1 handler: check mail and steer the active turn if there are messages.
+	// Registered once here so it persists across reconnects via refs.
 	process.on("SIGUSR1", () => {
 		try {
 			const messages = mailClient.check(config.agentName);
 			if (messages.length === 0) return;
-			if (activeTurnId === null) return;
+			if (refs.activeTurnId === null || refs.rpc === null || refs.threadId === null) return;
 
 			const summary = messages
 				.map((m) => `[${m.from}] ${m.subject}: ${m.body.slice(0, 200)}`)
 				.join("\n");
 
-			rpc
+			refs.rpc
 				.request("turn/steer", {
-					threadId,
-					expectedTurnId: activeTurnId,
+					threadId: refs.threadId,
+					expectedTurnId: refs.activeTurnId,
 					input: [{ type: "text", text: `New messages:\n${summary}`, text_elements: [] }],
 				} as Record<string, unknown>)
 				.catch((err: unknown) => {
@@ -927,30 +1108,38 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 		}
 	});
 
-	// Event loop: wait for shutdown signal (Promise-based instead of polling).
-	// Also detect unexpected WebSocket closure as a shutdown trigger.
-	await new Promise<void>((resolveShutdown) => {
-		shutdownResolve = resolveShutdown;
-		// If already requested before we set the resolve, fire immediately
-		if (shutdownRequested) {
-			resolveShutdown();
-			return;
+	// Reconnect loop: retry on unexpected disconnects, stop on normal shutdown
+	let lastProgressSummary = "";
+	let reconnectAttempt = 0;
+	while (true) {
+		const result = await runBridgeSession(
+			config,
+			overstoryDir,
+			eventStore,
+			mailClient,
+			modifiedFiles,
+			refs,
+			reconnectAttempt > 0,
+			lastProgressSummary,
+		);
+
+		lastProgressSummary = result.lastProgressSummary;
+		if (result.normalShutdown) break;
+
+		reconnectAttempt++;
+		if (!shouldAttemptReconnect(false, reconnectAttempt, config.maxReconnectAttempts)) {
+			console.error(
+				`[bridge] WebSocket disconnected. Max reconnect attempts (${config.maxReconnectAttempts}) reached, giving up.`,
+			);
+			break;
 		}
-		// Poll for WebSocket disconnection (rpc.closed set by close handler)
-		const disconnectCheck = setInterval(() => {
-			if (rpc.closed) {
-				clearInterval(disconnectCheck);
-				console.error("[bridge] WebSocket disconnected unexpectedly, shutting down");
-				resolveShutdown();
-			}
-		}, 1000);
-		// Clean up interval when shutdown resolves normally
-		const origResolve = shutdownResolve;
-		shutdownResolve = () => {
-			clearInterval(disconnectCheck);
-			origResolve?.();
-		};
-	});
+
+		const delayMs = config.reconnectBaseDelayMs * 2 ** (reconnectAttempt - 1);
+		console.log(
+			`[bridge] Reconnecting in ${delayMs}ms (attempt ${reconnectAttempt}/${config.maxReconnectAttempts})...`,
+		);
+		await Bun.sleep(delayMs);
+	}
 
 	// Graceful shutdown: session-end bookkeeping (delegated to extracted function)
 	await performShutdownBookkeeping(config, overstoryDir, {
@@ -959,6 +1148,7 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 		openSessionStore,
 		updateIdentity,
 		createRunStore,
+		stopServer,
 		runMulchLearn: async (cwd: string) => {
 			const mulchProc = Bun.spawn(["mulch", "learn"], {
 				cwd,
@@ -970,7 +1160,6 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 	});
 
 	// Close connections
-	rpc.close();
 	eventStore.close();
 	mailClient.close();
 }
