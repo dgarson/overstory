@@ -624,6 +624,31 @@ export const COMMANDS: readonly CommandDef[] = [
 			},
 		],
 	},
+	{
+		name: "daemon",
+		desc: "Manage Codex daemon sidecar",
+		flags: [
+			{ name: "--json", desc: "JSON output" },
+			{ name: "--help", desc: "Show help" },
+		],
+		subcommands: [
+			{
+				name: "start",
+				desc: "Start the Codex daemon sidecar",
+				flags: [{ name: "--json", desc: "JSON output" }],
+			},
+			{
+				name: "stop",
+				desc: "Stop the Codex daemon sidecar",
+				flags: [{ name: "--json", desc: "JSON output" }],
+			},
+			{
+				name: "status",
+				desc: "Show Codex daemon state",
+				flags: [{ name: "--json", desc: "JSON output" }],
+			},
+		],
+	},
 ] as const;
 
 export function generateBash(): string {
@@ -636,7 +661,7 @@ export function generateBash(): string {
 		"  local cur prev words cword",
 		"  _init_completion || return",
 		"",
-		"  local commands='init sling prime status dashboard inspect merge nudge clean doctor log logs watch trace errors feed replay costs metrics spec coordinator supervisor hooks monitor mail group worktree run'",
+		"  local commands='init sling prime status dashboard inspect merge nudge clean doctor log logs watch trace errors feed replay costs metrics spec coordinator supervisor hooks monitor mail group worktree run codex daemon'",
 		"",
 		"  # Top-level completion",
 		"  if [[ $cword -eq 1 ]]; then",
