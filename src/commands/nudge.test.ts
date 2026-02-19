@@ -57,6 +57,7 @@ function makeSession(overrides: Partial<AgentSession> = {}): AgentSession {
 		lastActivity: new Date().toISOString(),
 		escalationLevel: 0,
 		stalledSince: null,
+		runtime: "claude",
 		...overrides,
 	};
 }
@@ -163,6 +164,57 @@ describe("nudgeAgent", () => {
 		// Should use sessions.db entry, fail at tmux alive check
 		expect(result.delivered).toBe(false);
 		expect(result.reason).toContain("overstory-orchestrator");
+	});
+
+	test("delivers via mail for codex runtime agent (not tmux)", async () => {
+		// Agent with runtime === "codex": nudge should go through mail, not tmux.
+		// No real SIGUSR1 is tested here (that would require a live bridge process).
+		// We verify that: (1) nudge returns delivered=true, (2) a mail message was sent.
+		const overstoryDir = join(tempDir, ".overstory");
+		writeSessionsToStore(tempDir, [
+			makeSession({
+				state: "working",
+				runtime: "codex",
+				pid: null, // no bridge PID — SIGUSR1 path skipped gracefully
+			}),
+		]);
+
+		const { nudgeAgent } = await importNudge();
+		const result = await nudgeAgent(tempDir, "test-agent", "hello from orchestrator");
+		expect(result.delivered).toBe(true);
+
+		// Verify a mail message was sent to the codex agent
+		const { createMailStore: makeStore } = await import("../mail/store.ts");
+		const { createMailClient: makeClient } = await import("../mail/client.ts");
+		const store = makeStore(join(overstoryDir, "mail.db"));
+		const client = makeClient(store);
+		try {
+			const messages = client.list({ to: "test-agent" });
+			expect(messages.length).toBeGreaterThan(0);
+			const nudgeMsg = messages.find((m) => m.subject === "nudge");
+			expect(nudgeMsg).toBeDefined();
+			expect(nudgeMsg?.priority).toBe("high");
+			expect(nudgeMsg?.type).toBe("status");
+			expect(nudgeMsg?.body).toContain("hello from orchestrator");
+		} finally {
+			client.close();
+		}
+	});
+
+	test("codex runtime nudge with bridge PID does not throw on dead process", async () => {
+		// Use a PID that definitely does not exist to ensure the SIGUSR1 error is swallowed.
+		writeSessionsToStore(tempDir, [
+			makeSession({
+				state: "working",
+				runtime: "codex",
+				pid: 999999999, // Unlikely to exist
+			}),
+		]);
+
+		const { nudgeAgent } = await importNudge();
+		// Should not throw even when process.kill fails
+		const result = await nudgeAgent(tempDir, "test-agent", "wake up");
+		expect(result.delivered).toBe(true);
 	});
 
 	test("records nudge event to EventStore after delivery attempt", async () => {

@@ -1,16 +1,18 @@
 import { mkdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { AgentError } from "../errors.ts";
+import { BUNDLED_TEMPLATES } from "./bundled-defs.ts";
 
 /**
  * Capabilities that must never modify project files.
- * Includes read-only roles (scout, reviewer) and coordination roles (lead).
- * Only "builder" and "merger" are allowed to modify files.
+ * Read-only roles: scout, reviewer.
+ * Coordination-only roles: coordinator, supervisor, monitor.
+ * "lead" is NOT included — leads have Write/Edit tools and implement alongside coordinating.
+ * Only "builder" and "merger" are the canonical implementation roles, but lead shares that right.
  */
-const NON_IMPLEMENTATION_CAPABILITIES = new Set([
+export const NON_IMPLEMENTATION_CAPABILITIES = new Set([
 	"scout",
 	"reviewer",
-	"lead",
 	"coordinator",
 	"supervisor",
 	"monitor",
@@ -20,14 +22,14 @@ const NON_IMPLEMENTATION_CAPABILITIES = new Set([
  * Capabilities that coordinate work and need git add/commit for syncing
  * beads, mulch, and other metadata — but must NOT git push.
  */
-const COORDINATION_CAPABILITIES = new Set(["coordinator", "supervisor", "monitor"]);
+export const COORDINATION_CAPABILITIES = new Set(["coordinator", "supervisor", "monitor"]);
 
 /**
  * Additional safe Bash prefixes for coordination capabilities.
  * Allows git add/commit for beads sync, mulch records, etc.
  * git push remains blocked via DANGEROUS_BASH_PATTERNS.
  */
-const COORDINATION_SAFE_PREFIXES = ["git add", "git commit"];
+export const COORDINATION_SAFE_PREFIXES = ["git add", "git commit"];
 
 /**
  * Claude Code native team/task tools that bypass overstory orchestration.
@@ -53,7 +55,7 @@ const WRITE_TOOLS = ["Write", "Edit", "NotebookEdit"];
  * Bash commands that modify files and must be blocked for non-implementation agents.
  * Each pattern is a regex fragment used inside a grep -qE check.
  */
-const DANGEROUS_BASH_PATTERNS = [
+export const DANGEROUS_BASH_PATTERNS = [
 	"sed\\s+-i",
 	"sed\\s+--in-place",
 	"echo\\s+.*>",
@@ -98,7 +100,7 @@ const DANGEROUS_BASH_PATTERNS = [
  * If a command starts with any of these prefixes, it bypasses the dangerous command check.
  * This whitelist is checked BEFORE the blocklist.
  */
-const SAFE_BASH_PREFIXES = [
+export const SAFE_BASH_PREFIXES = [
 	"overstory ",
 	"bd ",
 	"git status",
@@ -118,15 +120,6 @@ const SAFE_BASH_PREFIXES = [
 interface HookEntry {
 	matcher: string;
 	hooks: Array<{ type: string; command: string }>;
-}
-
-/**
- * Resolve the path to the hooks template file.
- * The template lives at `templates/hooks.json.tmpl` relative to the repo root.
- */
-function getTemplatePath(): string {
-	// src/agents/hooks-deployer.ts -> repo root is ../../
-	return join(dirname(import.meta.dir), "..", "templates", "hooks.json.tmpl");
 }
 
 /**
@@ -310,7 +303,7 @@ export function buildBashFileGuardScript(
 		safePrefixChecks,
 		// Then: check for dangerous patterns
 		`if echo "$CMD" | grep -qE '${dangerPattern}'; then`,
-		`  echo '{"decision":"block","reason":"${capability} agents cannot modify files — this command is not allowed"}';`,
+		`  echo "{\\"decision\\":\\"block\\",\\"reason\\":\\"${capability} agents cannot modify files — blocked command: $CMD\\"}";`,
 		"  exit 0;",
 		"fi;",
 	].join(" ");
@@ -489,23 +482,10 @@ export async function deployHooks(
 	agentName: string,
 	capability = "builder",
 ): Promise<void> {
-	const templatePath = getTemplatePath();
-	const file = Bun.file(templatePath);
-	const exists = await file.exists();
-
-	if (!exists) {
-		throw new AgentError(`Hooks template not found: ${templatePath}`, {
+	const template = BUNDLED_TEMPLATES["hooks.json.tmpl"];
+	if (!template) {
+		throw new AgentError("Hooks template missing from binary (rebuild with make bundled-defs)", {
 			agentName,
-		});
-	}
-
-	let template: string;
-	try {
-		template = await file.text();
-	} catch (err) {
-		throw new AgentError(`Failed to read hooks template: ${templatePath}`, {
-			agentName,
-			cause: err instanceof Error ? err : undefined,
 		});
 	}
 

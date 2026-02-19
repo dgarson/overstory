@@ -6,6 +6,9 @@ bun.lockb
 dist/
 *.tsbuildinfo
 
+# Generated at build time by scripts/gen-bundled-defs.ts
+src/agents/bundled-defs.ts
+
 # OS files
 .DS_Store
 Thumbs.db
@@ -30,3 +33,6 @@ Thumbs.db
 
 # Test artifacts
 coverage/
+
+# Development worktrees
+.worktrees/

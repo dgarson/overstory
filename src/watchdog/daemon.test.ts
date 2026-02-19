@@ -136,16 +136,21 @@ function triageAlways(
 /** Create a fake _nudge that tracks calls and always succeeds. */
 function nudgeTracker(): {
 	nudge: (
-		projectRoot: string,
 		agentName: string,
 		message: string,
-		force: boolean,
+		from: string,
+		opts?: { force?: boolean },
 	) => Promise<{ delivered: boolean; reason?: string }>;
 	calls: Array<{ agentName: string; message: string }>;
 } {
 	const calls: Array<{ agentName: string; message: string }> = [];
 	return {
-		nudge: async (_projectRoot: string, agentName: string, message: string, _force: boolean) => {
+		nudge: async (
+			agentName: string,
+			message: string,
+			_from: string,
+			_opts?: { force?: boolean },
+		) => {
 			calls.push({ agentName, message });
 			return { delivered: true };
 		},
@@ -790,6 +795,39 @@ describe("daemon tick", () => {
 	});
 
 	// --- Backward compatibility ---
+
+	test("codex-daemon session produces working state without tmux check", async () => {
+		// codex-daemon agents don't use tmux. Even with tmuxAllDead(), the session
+		// must stay working because evaluateDaemonHealth skips ZFC tmux checks.
+		const session = makeSession({
+			agentName: "daemon-agent",
+			tmuxSession: "overstory-daemon-agent",
+			state: "working",
+			runtime: "codex-daemon",
+			lastActivity: new Date().toISOString(),
+		});
+
+		writeSessionsToStore(tempRoot, [session]);
+
+		const checks: HealthCheck[] = [];
+
+		await runDaemonTick({
+			root: tempRoot,
+			...THRESHOLDS,
+			onHealthCheck: (c) => checks.push(c),
+			_tmux: tmuxAllDead(), // Would normally cause zombie — but daemon agents skip tmux
+			_triage: triageAlways("extend"),
+			_nudge: nudgeTracker().nudge,
+		});
+
+		expect(checks).toHaveLength(1);
+		expect(checks[0]?.state).toBe("working");
+		expect(checks[0]?.action).toBe("none");
+
+		// Session state stays working — daemon agents are not marked zombie by tmux liveness
+		const reloaded = readSessionsFromStore(tempRoot);
+		expect(reloaded[0]?.state).toBe("working");
+	});
 
 	test("sessions with default escalation fields are processed correctly", async () => {
 		// Write a session with default (zero) escalation fields

@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { BUNDLED_AGENT_DEFS } from "../agents/bundled-defs.ts";
 import { cleanupTempDir, createTempGitRepo } from "../test-helpers.ts";
-import { initCommand, OVERSTORY_GITIGNORE } from "./init.ts";
+import { AGENT_DEF_FILES, initCommand, OVERSTORY_GITIGNORE } from "./init.ts";
 
 /**
  * Tests for `overstory init` -- agent definition deployment.
@@ -10,20 +11,6 @@ import { initCommand, OVERSTORY_GITIGNORE } from "./init.ts";
  * Uses real temp git repos. Suppresses stdout to keep test output clean.
  * process.cwd() is saved/restored because initCommand uses it to find the project root.
  */
-
-const AGENT_DEF_FILES = [
-	"scout.md",
-	"builder.md",
-	"reviewer.md",
-	"lead.md",
-	"merger.md",
-	"supervisor.md",
-	"coordinator.md",
-	"monitor.md",
-];
-
-/** Resolve the source agents directory (same logic as init.ts). */
-const SOURCE_AGENTS_DIR = join(import.meta.dir, "..", "..", "agents");
 
 describe("initCommand: agent-defs deployment", () => {
 	let tempDir: string;
@@ -60,12 +47,10 @@ describe("initCommand: agent-defs deployment", () => {
 		await initCommand([]);
 
 		for (const fileName of AGENT_DEF_FILES) {
-			const sourcePath = join(SOURCE_AGENTS_DIR, fileName);
-			const targetPath = join(tempDir, ".overstory", "agent-defs", fileName);
-
-			const sourceContent = await Bun.file(sourcePath).text();
-			const targetContent = await Bun.file(targetPath).text();
-
+			const sourceContent = BUNDLED_AGENT_DEFS[fileName] ?? "";
+			const targetContent = await Bun.file(
+				join(tempDir, ".overstory", "agent-defs", fileName),
+			).text();
 			expect(targetContent).toBe(sourceContent);
 		}
 	});
@@ -86,7 +71,7 @@ describe("initCommand: agent-defs deployment", () => {
 		await initCommand(["--force"]);
 
 		// Verify the file was overwritten with the original source
-		const sourceContent = await Bun.file(join(SOURCE_AGENTS_DIR, "scout.md")).text();
+		const sourceContent = BUNDLED_AGENT_DEFS["scout.md"] ?? "";
 		const restored = await Bun.file(tamperPath).text();
 		expect(restored).toBe(sourceContent);
 	});

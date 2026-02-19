@@ -5,20 +5,20 @@
  * tmux send-keys. Used to notify agents of new mail or relay urgent
  * instructions mid-conversation.
  *
- * Includes retry logic (3 attempts) and debounce (500ms) to prevent
- * rapid-fire nudges to the same agent.
+ * For Codex agents (runtime === "codex"), delegates to CodexBridgeDriver.nudge()
+ * which sends high-priority mail and wakes the bridge via SIGUSR1.
+ *
+ * Includes debounce (500ms) to prevent rapid-fire nudges to the same agent.
+ * Retry logic lives inside each driver implementation.
  */
 
 import { join } from "node:path";
 import { AgentError, ValidationError } from "../errors.ts";
 import { createEventStore } from "../events/store.ts";
 import { openSessionStore } from "../sessions/compat.ts";
-import type { EventStore } from "../types.ts";
-import { isSessionAlive, sendKeys } from "../worktree/tmux.ts";
+import type { AgentRuntime, EventStore } from "../types.ts";
 
 const DEFAULT_MESSAGE = "Check your mail inbox for new messages.";
-const MAX_RETRIES = 3;
-const RETRY_DELAY_MS = 500;
 const DEBOUNCE_MS = 500;
 
 /**
@@ -81,23 +81,36 @@ async function loadOrchestratorTmuxSession(projectRoot: string): Promise<string 
 	}
 }
 
+/** Resolved information about a target agent for nudge delivery. */
+interface ResolvedTarget {
+	tmuxSession: string;
+	runtime: AgentRuntime;
+	bridgePid: number | null;
+}
+
 /**
- * Resolve the tmux session name for an agent.
+ * Resolve the target session info for an agent.
  *
  * For regular agents, looks up the SessionStore.
  * For "orchestrator", falls back to the orchestrator-tmux.json registration
  * file written by `overstory prime`.
+ *
+ * Returns null if no active session is found.
  */
 async function resolveTargetSession(
 	projectRoot: string,
 	agentName: string,
-): Promise<string | null> {
+): Promise<ResolvedTarget | null> {
 	const overstoryDir = join(projectRoot, ".overstory");
 	const { store } = openSessionStore(overstoryDir);
 	try {
 		const session = store.getByName(agentName);
 		if (session && session.state !== "zombie" && session.state !== "completed") {
-			return session.tmuxSession;
+			return {
+				tmuxSession: session.tmuxSession,
+				runtime: session.runtime ?? "claude",
+				bridgePid: session.pid,
+			};
 		}
 	} finally {
 		store.close();
@@ -105,7 +118,10 @@ async function resolveTargetSession(
 
 	// Fallback for orchestrator: check orchestrator-tmux.json
 	if (agentName === "orchestrator") {
-		return await loadOrchestratorTmuxSession(projectRoot);
+		const tmuxSession = await loadOrchestratorTmuxSession(projectRoot);
+		if (tmuxSession !== null) {
+			return { tmuxSession, runtime: "claude", bridgePid: null };
+		}
 	}
 
 	return null;
@@ -149,33 +165,6 @@ async function recordNudge(statePath: string, agentName: string): Promise<void> 
 	}
 	state[agentName] = Date.now();
 	await Bun.write(statePath, `${JSON.stringify(state, null, "\t")}\n`);
-}
-
-/**
- * Send a nudge to an agent's tmux session with retry logic.
- *
- * @param tmuxSession - The tmux session name
- * @param message - The text to send
- * @returns true if the nudge was delivered, false if all retries failed
- */
-async function sendNudgeWithRetry(tmuxSession: string, message: string): Promise<boolean> {
-	for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-		try {
-			await sendKeys(tmuxSession, message);
-			// Follow-up Enter after a short delay to ensure submission.
-			// Claude Code's TUI may consume the first Enter during re-render/focus
-			// events, leaving text visible but unsubmitted (overstory-t62v).
-			// Same workaround as sling.ts and coordinator.ts.
-			await Bun.sleep(500);
-			await sendKeys(tmuxSession, "");
-			return true;
-		} catch {
-			if (attempt < MAX_RETRIES) {
-				await Bun.sleep(RETRY_DELAY_MS);
-			}
-		}
-	}
-	return false;
 }
 
 /**
@@ -234,6 +223,10 @@ function recordNudgeEvent(
 /**
  * Core nudge function. Exported for use by mail send auto-nudge.
  *
+ * Dispatches to the appropriate driver based on the persisted session runtime.
+ * For "codex" agents, CodexBridgeDriver handles debounce and recordNudge internally.
+ * For "claude" agents, debounce is managed here and ClaudeDriver handles tmux delivery.
+ *
  * @param projectRoot - Absolute path to the project root
  * @param agentName - Name of the agent to nudge
  * @param message - Text to send (defaults to mail check prompt)
@@ -246,53 +239,90 @@ export async function nudgeAgent(
 	message: string = DEFAULT_MESSAGE,
 	force = false,
 ): Promise<{ delivered: boolean; reason?: string }> {
+	const overstoryDir = join(projectRoot, ".overstory");
+	const statePath = join(overstoryDir, "nudge-state.json");
+
+	const target = await resolveTargetSession(projectRoot, agentName);
+	if (!target) {
+		return { delivered: false, reason: `No active session for agent "${agentName}"` };
+	}
+
 	let result: { delivered: boolean; reason?: string };
 
-	// Resolve tmux session (SessionStore for agents, orchestrator-tmux.json for orchestrator)
-	const tmuxSessionName = await resolveTargetSession(projectRoot, agentName);
-
-	if (!tmuxSessionName) {
-		result = { delivered: false, reason: `No active session for agent "${agentName}"` };
+	if (target.runtime === "codex") {
+		// CodexBridgeDriver.nudge() requires overstoryDir to locate mail.db and bridge.pid.
+		// Construct with minimal nudge-only deps to avoid loading spawn-related modules
+		// (codex/overlay.ts, etc.) that require the generated bundled-defs.ts artifact.
+		// The codex driver handles debounce and recordNudge internally.
+		const { CodexBridgeDriver } = await import("../drivers/codex-bridge.ts");
+		const { createMailStore } = await import("../mail/store.ts");
+		const { createMailClient } = await import("../mail/client.ts");
+		const driver = new CodexBridgeDriver(
+			{
+				// Cannot use makeCodexBridgeDriverDeps() here — it transitively imports
+				// codex/overlay.ts → bundled-defs.ts (a generated artifact that may not exist
+				// during tests or the nudge-only code path). Construct minimal deps inline.
+				sendMail: (mailDbPath, opts) => {
+					const store = createMailStore(mailDbPath);
+					const client = createMailClient(store);
+					try {
+						client.send(opts);
+					} finally {
+						client.close();
+					}
+				},
+				getBridgePid: async (dir, name) => {
+					try {
+						const pidFile = Bun.file(join(dir, "agents", name, "bridge.pid"));
+						if (await pidFile.exists()) {
+							const pidFromFile = Number.parseInt((await pidFile.text()).trim(), 10);
+							if (!Number.isNaN(pidFromFile)) {
+								return pidFromFile;
+							}
+						}
+					} catch {
+						// Fall through
+					}
+					return null;
+				},
+				processKill: (pid, signal) => process.kill(pid, signal as NodeJS.Signals),
+				// Spawn-only stubs: never called during nudge
+				createSession: async () => 0,
+				startServer: async () => ({ pid: 0, port: 0, startedAt: "", url: "" }),
+				writeAgentsOverlay: async () => {},
+				writeCodexConfig: async () => {},
+			},
+			overstoryDir,
+		);
+		result = await driver.nudge(agentName, message, "orchestrator", { force });
 	} else {
-		// Check debounce (unless forced)
-		let debounced = false;
-		if (!force) {
-			const statePath = join(projectRoot, ".overstory", "nudge-state.json");
-			debounced = await isDebounced(statePath, agentName);
+		// Claude agents: debounce check lives here (ClaudeDriver does not maintain debounce state).
+		if (!force && (await isDebounced(statePath, agentName))) {
+			return { delivered: false, reason: "Debounced: nudge sent too recently" };
 		}
-
-		if (debounced) {
-			result = { delivered: false, reason: "Debounced: nudge sent too recently" };
-		} else {
-			// Verify tmux session is alive
-			const alive = await isSessionAlive(tmuxSessionName);
-			if (!alive) {
-				result = {
-					delivered: false,
-					reason: `Tmux session "${tmuxSessionName}" is not alive`,
-				};
-			} else {
-				// Send with retry
-				const delivered = await sendNudgeWithRetry(tmuxSessionName, message);
-
-				if (delivered) {
-					// Record nudge for debounce tracking
-					const statePath = join(projectRoot, ".overstory", "nudge-state.json");
-					await recordNudge(statePath, agentName);
-					result = { delivered: true };
-				} else {
-					result = {
-						delivered: false,
-						reason: `Failed to send after ${MAX_RETRIES} attempts`,
-					};
-				}
-			}
+		// Construct ClaudeDriver with minimal nudge-only deps to avoid loading
+		// agents/overlay.ts and hooks-deployer.ts (which require bundled-defs.ts).
+		// ClaudeDriver.nudge() only uses isSessionAlive and sendKeys; the spawn-related
+		// deps (writeOverlay, deployHooks, createSession) are stubs that never run here.
+		const { ClaudeDriver } = await import("../drivers/claude.ts");
+		const { isSessionAlive, sendKeys } = await import("../worktree/tmux.ts");
+		const driver = new ClaudeDriver({
+			sendKeys,
+			isSessionAlive,
+			// Spawn-only stubs: never called during nudge
+			createSession: async () => 0,
+			writeOverlay: async () => {},
+			deployHooks: async () => {},
+		});
+		// ClaudeDriver.nudge() treats its first arg as the tmux session name.
+		result = await driver.nudge(target.tmuxSession, message, "orchestrator", { force });
+		if (result.delivered) {
+			await recordNudge(statePath, agentName);
 		}
 	}
 
 	// Record event to EventStore (fire-and-forget)
 	try {
-		const overstoryDir = join(projectRoot, ".overstory");
 		const eventsDbPath = join(overstoryDir, "events.db");
 		const eventStore = createEventStore(eventsDbPath);
 		try {

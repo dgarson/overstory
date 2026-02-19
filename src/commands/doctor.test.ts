@@ -227,6 +227,7 @@ describe("doctorCommand", () => {
 				"merge",
 				"logs",
 				"version",
+				"codex",
 			];
 
 			for (const category of categories) {

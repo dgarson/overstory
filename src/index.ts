@@ -9,9 +9,11 @@
 
 import { agentsCommand } from "./commands/agents.ts";
 import { cleanCommand } from "./commands/clean.ts";
+import { codexCommand } from "./commands/codex.ts";
 import { completionsCommand } from "./commands/completions.ts";
 import { coordinatorCommand } from "./commands/coordinator.ts";
 import { costsCommand } from "./commands/costs.ts";
+import { daemonCommand } from "./commands/daemon.ts";
 import { dashboardCommand } from "./commands/dashboard.ts";
 import { doctorCommand } from "./commands/doctor.ts";
 import { errorsCommand } from "./commands/errors.ts";
@@ -76,6 +78,8 @@ Commands:
   replay [options]        Interleaved chronological replay across agents
   costs [options]          Token/cost analysis and breakdown
   metrics                 Show session metrics
+  codex <sub>             Manage Codex App Server (start/stop/status)
+  daemon <sub>            Manage Codex daemon sidecar (start/stop/status)
 
 Options:
   --help, -h              Show this help
@@ -115,6 +119,8 @@ const COMMANDS = [
 	"run",
 	"costs",
 	"metrics",
+	"codex",
+	"daemon",
 ];
 
 function editDistance(a: string, b: string): number {
@@ -275,6 +281,12 @@ async function main(): Promise<void> {
 			break;
 		case "metrics":
 			await metricsCommand(commandArgs);
+			break;
+		case "codex":
+			await codexCommand(commandArgs);
+			break;
+		case "daemon":
+			await daemonCommand(commandArgs);
 			break;
 		default: {
 			process.stderr.write(`Unknown command: ${command}\n`);

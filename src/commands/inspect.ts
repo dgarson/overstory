@@ -240,7 +240,7 @@ export async function gatherInspectData(
 
 		// tmux capture
 		let tmuxOutput: string | null = null;
-		if (!opts.noTmux && session.tmuxSession) {
+		if (!opts.noTmux && session.tmuxSession && session.runtime !== "codex") {
 			const lines = opts.tmuxLines ?? 30;
 			tmuxOutput = await captureTmux(session.tmuxSession, lines);
 		}
