@@ -17,6 +17,7 @@ import { checkMergeQueue } from "../doctor/merge-queue.ts";
 import { checkStructure } from "../doctor/structure.ts";
 import type { DoctorCategory, DoctorCheck, DoctorCheckFn } from "../doctor/types.ts";
 import { checkVersion } from "../doctor/version.ts";
+import { checkWorkflow } from "../doctor/workflow.ts";
 import { ValidationError } from "../errors.ts";
 import { color } from "../logging/color.ts";
 
@@ -32,6 +33,7 @@ const ALL_CHECKS: Array<{ category: DoctorCategory; fn: DoctorCheckFn }> = [
 	{ category: "logs", fn: checkLogs },
 	{ category: "version", fn: checkVersion },
 	{ category: "codex", fn: checkCodex },
+	{ category: "workflow", fn: checkWorkflow },
 ];
 
 function hasFlag(args: string[], flag: string): boolean {

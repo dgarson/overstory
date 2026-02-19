@@ -184,6 +184,7 @@ export const COMMANDS: readonly CommandDef[] = [
 					"merge",
 					"logs",
 					"version",
+					"workflow",
 				],
 			},
 			{ name: "--help", desc: "Show help" },

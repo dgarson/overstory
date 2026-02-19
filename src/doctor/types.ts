@@ -13,7 +13,8 @@ export type DoctorCategory =
 	| "merge"
 	| "logs"
 	| "version"
-	| "codex";
+	| "codex"
+	| "workflow";
 
 /** Result of a single doctor health check. */
 export interface DoctorCheck {

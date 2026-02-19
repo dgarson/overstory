@@ -1703,3 +1703,101 @@ describe("bash path boundary integration", () => {
 		expect(pathGuard).toBeDefined();
 	});
 });
+
+describe("deployHooks — MCP options", () => {
+	let tempDir: string;
+
+	beforeEach(async () => {
+		tempDir = await mkdtemp(join(tmpdir(), "overstory-mcp-hooks-test-"));
+	});
+
+	afterEach(async () => {
+		await rm(tempDir, { recursive: true, force: true });
+	});
+
+	test("does not create .mcp.json when mcpEnabled is false", async () => {
+		const worktreePath = join(tempDir, "worktree");
+
+		await deployHooks(worktreePath, "my-builder", "builder", { mcpEnabled: false });
+
+		const mcpPath = join(worktreePath, ".mcp.json");
+		const exists = await Bun.file(mcpPath).exists();
+		expect(exists).toBe(false);
+	});
+
+	test("does not create .mcp.json when options are omitted", async () => {
+		const worktreePath = join(tempDir, "worktree");
+
+		await deployHooks(worktreePath, "my-builder");
+
+		const mcpPath = join(worktreePath, ".mcp.json");
+		const exists = await Bun.file(mcpPath).exists();
+		expect(exists).toBe(false);
+	});
+
+	test("creates .mcp.json when mcpEnabled is true", async () => {
+		const worktreePath = join(tempDir, "worktree");
+
+		await deployHooks(worktreePath, "my-builder", "builder", { mcpEnabled: true });
+
+		const mcpPath = join(worktreePath, ".mcp.json");
+		const exists = await Bun.file(mcpPath).exists();
+		expect(exists).toBe(true);
+	});
+
+	test(".mcp.json contains overstory server URL on default port 21817", async () => {
+		const worktreePath = join(tempDir, "worktree");
+
+		await deployHooks(worktreePath, "my-builder", "builder", { mcpEnabled: true });
+
+		const mcpPath = join(worktreePath, ".mcp.json");
+		const content = await Bun.file(mcpPath).text();
+		const parsed = JSON.parse(content) as {
+			mcpServers: { overstory: { url: string } };
+		};
+
+		expect(parsed.mcpServers.overstory.url).toBe("http://127.0.0.1:21817/mcp");
+	});
+
+	test(".mcp.json uses custom port when mcpPort is provided", async () => {
+		const worktreePath = join(tempDir, "worktree");
+
+		await deployHooks(worktreePath, "my-builder", "builder", {
+			mcpEnabled: true,
+			mcpPort: 19999,
+		});
+
+		const mcpPath = join(worktreePath, ".mcp.json");
+		const content = await Bun.file(mcpPath).text();
+		const parsed = JSON.parse(content) as {
+			mcpServers: { overstory: { url: string } };
+		};
+
+		expect(parsed.mcpServers.overstory.url).toBe("http://127.0.0.1:19999/mcp");
+	});
+
+	test(".mcp.json is valid JSON with mcpServers key", async () => {
+		const worktreePath = join(tempDir, "worktree");
+
+		await deployHooks(worktreePath, "my-builder", "builder", { mcpEnabled: true });
+
+		const mcpPath = join(worktreePath, ".mcp.json");
+		const content = await Bun.file(mcpPath).text();
+		const parsed = JSON.parse(content) as { mcpServers: Record<string, unknown> };
+
+		expect(typeof parsed.mcpServers).toBe("object");
+		expect("overstory" in parsed.mcpServers).toBe(true);
+	});
+
+	test("settings.local.json is still created alongside .mcp.json", async () => {
+		const worktreePath = join(tempDir, "worktree");
+
+		await deployHooks(worktreePath, "my-builder", "builder", { mcpEnabled: true });
+
+		const hooksPath = join(worktreePath, ".claude", "settings.local.json");
+		const mcpPath = join(worktreePath, ".mcp.json");
+
+		expect(await Bun.file(hooksPath).exists()).toBe(true);
+		expect(await Bun.file(mcpPath).exists()).toBe(true);
+	});
+});

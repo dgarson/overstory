@@ -1,0 +1,68 @@
+# Overstory configuration
+# See: https://github.com/overstory/overstory
+#
+# Copy this file to .overstory/config.yaml in your project and fill in
+# project.name and project.root.
+
+project:
+  name: your-project           # Replace with your project name
+  root: /path/to/your/project  # Replace with absolute path to your repo
+  canonicalBranch: main
+
+agents:
+  manifestPath: .overstory/agent-manifest.json
+  baseDir: .overstory/agent-defs
+  maxConcurrent: 25
+  staggerDelayMs: 2000
+  maxDepth: 2
+
+worktrees:
+  baseDir: .overstory/worktrees
+
+beads:
+  enabled: true
+
+mulch:
+  enabled: true
+  domains: []
+  primeFormat: markdown
+
+merge:
+  aiResolveEnabled: true
+  reimagineEnabled: false
+
+watchdog:
+  tier0Enabled: true
+  tier0IntervalMs: 30000
+  tier1Enabled: false
+  tier2Enabled: false
+  staleThresholdMs: 300000
+  zombieThresholdMs: 600000
+  nudgeIntervalMs: 60000
+
+logging:
+  verbose: false
+  redactSecrets: true
+
+codex:
+  enabled: true
+  model: gpt-5.3-codex
+  serverPort: 21816
+  compactionThreshold: 0.8
+  maxDeltaBufferBytes: 1048576
+  approvalTimeoutMs: 60000
+  defaultRuntime:
+    builder: codex
+    reviewer: codex
+  intraProcess: false     # false = bridge (per-agent process), true = daemon (sidecar)
+  daemonPort: 0           # 0 = dynamic (OS-assigned), >0 = fixed port
+
+mcp:
+  enabled: false            # Set to true to enable the MCP server
+  port: 21817               # HTTP port for the MCP server
+  coordinatorIntervalMs: 5000   # How often the coordinator loop ticks (ms)
+  idleThresholdMs: 60000    # How long before an agent is considered idle (ms)
+  awaitWorkMaxMs: 300000    # Maximum await_work timeout (ms)
+
+tickets:
+  provider: beads           # Ticket provider: "beads" (default)

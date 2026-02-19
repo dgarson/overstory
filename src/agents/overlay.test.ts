@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentError } from "../errors.ts";
 import type { OverlayConfig } from "../types.ts";
-import { generateOverlay, isCanonicalRoot, writeOverlay } from "./overlay.ts";
+import { formatMcpSection, generateOverlay, isCanonicalRoot, writeOverlay } from "./overlay.ts";
 
 const SAMPLE_BASE_DEFINITION = `# Builder Agent
 
@@ -543,5 +543,78 @@ describe("isCanonicalRoot", () => {
 		const canonicalRoot = "/projects/overstory";
 		const worktreePath = "/projects/overstory/.overstory/worktrees/dogfood-agent";
 		expect(isCanonicalRoot(worktreePath, canonicalRoot)).toBe(false);
+	});
+});
+
+describe("formatMcpSection", () => {
+	test("returns empty string when mcpEnabled is false", () => {
+		expect(formatMcpSection(false)).toBe("");
+	});
+
+	test("returns empty string when mcpEnabled is undefined", () => {
+		expect(formatMcpSection(undefined)).toBe("");
+	});
+
+	test("returns non-empty string when mcpEnabled is true", () => {
+		const section = formatMcpSection(true);
+		expect(section.length).toBeGreaterThan(0);
+	});
+
+	test("contains MCP Tools heading when enabled", () => {
+		const section = formatMcpSection(true);
+		expect(section).toContain("MCP Tools");
+	});
+
+	test("contains send_message tool reference when enabled", () => {
+		const section = formatMcpSection(true);
+		expect(section).toContain("send_message");
+	});
+
+	test("contains check_messages tool reference when enabled", () => {
+		const section = formatMcpSection(true);
+		expect(section).toContain("check_messages");
+	});
+
+	test("contains advance_task tool reference when enabled", () => {
+		const section = formatMcpSection(true);
+		expect(section).toContain("advance_task");
+	});
+
+	test("contains await_work tool reference when enabled", () => {
+		const section = formatMcpSection(true);
+		expect(section).toContain("await_work");
+	});
+});
+
+describe("generateOverlay — MCP section injection", () => {
+	test("overlay contains MCP section when mcpEnabled is true", async () => {
+		const config = makeConfig({ mcpEnabled: true });
+		const output = await generateOverlay(config);
+		expect(output).toContain("MCP Tools");
+		expect(output).toContain("send_message");
+	});
+
+	test("overlay does NOT contain MCP section when mcpEnabled is false", async () => {
+		const config = makeConfig({ mcpEnabled: false });
+		const output = await generateOverlay(config);
+		expect(output).not.toContain("mcp__overstory__send_message");
+	});
+
+	test("overlay does NOT contain MCP section when mcpEnabled is omitted", async () => {
+		const config = makeConfig({});
+		const output = await generateOverlay(config);
+		expect(output).not.toContain("mcp__overstory__send_message");
+	});
+
+	test("MCP_SECTION placeholder is fully replaced (no literal {{MCP_SECTION}} in output)", async () => {
+		const config = makeConfig({ mcpEnabled: true });
+		const output = await generateOverlay(config);
+		expect(output).not.toContain("{{MCP_SECTION}}");
+	});
+
+	test("MCP_SECTION placeholder is fully replaced even when disabled", async () => {
+		const config = makeConfig({ mcpEnabled: false });
+		const output = await generateOverlay(config);
+		expect(output).not.toContain("{{MCP_SECTION}}");
 	});
 });
