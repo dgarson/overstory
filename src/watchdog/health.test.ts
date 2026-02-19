@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentSession } from "../types.ts";
-import { evaluateHealth, isProcessRunning, transitionState } from "./health.ts";
+import {
+	evaluateDaemonHealth,
+	evaluateHealth,
+	isProcessRunning,
+	transitionState,
+} from "./health.ts";
 
 /**
  * Tests for the ZFC-based health evaluation and state machine.
@@ -312,6 +317,64 @@ describe("evaluateHealth", () => {
 		// tmux dead takes priority, so state is zombie via ZFC Rule 1
 		expect(check.state).toBe("zombie");
 		expect(check.pidAlive).toBe(false);
+	});
+});
+
+// === evaluateDaemonHealth ===
+
+describe("evaluateDaemonHealth", () => {
+	test("codex-daemon session returns working state without tmux check", () => {
+		const session = makeSession({ runtime: "codex-daemon", state: "working" });
+		const check = evaluateDaemonHealth(session, THRESHOLDS);
+
+		expect(check.state).toBe("working");
+		expect(check.action).toBe("none");
+		expect(check.agentName).toBe(session.agentName);
+		// tmux is not used for daemon agents
+		expect(check.tmuxAlive).toBe(false);
+		// processAlive is set to true as placeholder (daemon health is opaque)
+		expect(check.processAlive).toBe(true);
+		expect(check.reconciliationNote).toContain("codex-daemon");
+	});
+
+	test("codex-daemon session with stale activity still returns working (daemon health is opaque)", () => {
+		const oldActivity = new Date(Date.now() - 200_000).toISOString();
+		const session = makeSession({
+			runtime: "codex-daemon",
+			state: "working",
+			lastActivity: oldActivity,
+		});
+		const check = evaluateDaemonHealth(session, THRESHOLDS);
+
+		// Even with zombie-level inactivity, daemon agents are not marked zombie.
+		// The real health check is deferred to Task 14 (HTTP endpoint).
+		expect(check.state).toBe("working");
+		expect(check.action).toBe("none");
+	});
+
+	test("codex-daemon session via evaluateHealth guard routes to evaluateDaemonHealth", () => {
+		const session = makeSession({ runtime: "codex-daemon", state: "working" });
+		// tmuxAlive=false would normally trigger zombie for non-daemon agents,
+		// but codex-daemon skips the tmux check entirely.
+		const check = evaluateHealth(session, false, THRESHOLDS);
+
+		expect(check.state).toBe("working");
+		expect(check.action).toBe("none");
+		expect(check.reconciliationNote).toContain("codex-daemon");
+	});
+
+	test("codex-daemon session with old activity via evaluateHealth does not become zombie", () => {
+		const oldActivity = new Date(Date.now() - 200_000).toISOString();
+		const session = makeSession({
+			runtime: "codex-daemon",
+			state: "working",
+			lastActivity: oldActivity,
+		});
+		// tmuxAlive=true is passed but irrelevant for codex-daemon
+		const check = evaluateHealth(session, true, THRESHOLDS);
+
+		expect(check.state).toBe("working");
+		expect(check.action).toBe("none");
 	});
 });
 
