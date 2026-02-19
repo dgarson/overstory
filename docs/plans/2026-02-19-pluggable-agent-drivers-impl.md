@@ -4,7 +4,7 @@
 
 **Goal:** Replace inline runtime branching in sling/nudge with a pluggable AgentDriver interface, then add a CodexDaemonDriver for intra-process Codex agent management via a sidecar HTTP daemon.
 
-**Architecture:** Strategy pattern with three AgentDriver implementations (ClaudeDriver, CodexBridgeDriver, CodexDaemonDriver). sling.ts resolves the driver from config and delegates spawn. nudge.ts delegates delivery. A new sidecar daemon process manages Codex agents via multiplexed WebSocket connections to the App Server.
+**Architecture:** Strategy pattern with three AgentDriver implementations (ClaudeDriver, CodexBridgeDriver, CodexDaemonDriver). sling.ts resolves the driver at spawn time (persisting the runtime on the session), and all operation-time calls (nudge, inspect, shutdown) resolve the driver from the persisted session.runtime. A new sidecar daemon process manages Codex agents via multiplexed WebSocket connections to the App Server.
 
 **Tech Stack:** TypeScript (strict), Bun runtime, bun:sqlite, Bun.serve() for daemon HTTP, bun:test for testing.
 
@@ -12,10 +12,10 @@
 
 ## Phase 1: Interface + Types Foundation
 
-### Task 1: Add config types for intraProcess and daemonPort
+### Task 1: Extend AgentRuntime, add config types for intraProcess and daemonPort
 
 **Files:**
-- Modify: `src/types.ts:48-63` (CodexConfig interface)
+- Modify: `src/types.ts:48-63` (CodexConfig interface, AgentRuntime type)
 - Modify: `src/config.ts:51-59` (DEFAULT_CONFIG.codex)
 - Modify: `src/config.ts:439-485` (validateCodexConfig)
 - Modify: `src/config.test.ts` (add validation tests)
@@ -27,19 +27,24 @@ Add tests in `src/config.test.ts` for the new fields:
 
 ```typescript
 test("codex.intraProcess defaults to false", () => {
-	// loadConfig with codex section but no intraProcess should default to false
 	const config = /* load a config with codex section */;
 	expect(config.codex?.intraProcess).toBe(false);
 });
 
-test("codex.daemonPort defaults to 21817", () => {
+test("codex.daemonPort defaults to 0", () => {
 	const config = /* load a config with codex section */;
-	expect(config.codex?.daemonPort).toBe(21817);
+	expect(config.codex?.daemonPort).toBe(0);
 });
 
-test("rejects codex.daemonPort outside 1-65535", () => {
-	// Write a config.yaml with daemonPort: 0
+test("rejects codex.daemonPort outside 0-65535", () => {
+	// Write a config.yaml with daemonPort: -1
 	expect(() => /* loadConfig */).toThrow("codex.daemonPort");
+});
+
+test("accepts codex.daemonPort of 0 for dynamic allocation", () => {
+	// Write a config.yaml with daemonPort: 0
+	const config = /* loadConfig */;
+	expect(config.codex?.daemonPort).toBe(0);
 });
 ```
 
@@ -50,9 +55,12 @@ Expected: FAIL — `intraProcess` and `daemonPort` don't exist on CodexConfig
 
 **Step 3: Add the types and defaults**
 
-In `src/types.ts`, add to `CodexConfig`:
+In `src/types.ts`, extend `AgentRuntime` and add to `CodexConfig`:
 
 ```typescript
+/** "codex-daemon" distinguishes daemon-managed agents from bridge agents at the session level */
+export type AgentRuntime = "claude" | "codex" | "codex-daemon";
+
 export interface CodexConfig {
 	enabled: boolean;
 	defaultRuntime: Partial<Record<string, AgentRuntime>>;
@@ -63,7 +71,7 @@ export interface CodexConfig {
 	approvalTimeoutMs: number;
 	/** Use intra-process daemon instead of per-agent bridge processes */
 	intraProcess: boolean;
-	/** HTTP port for the CodexDaemon sidecar (only used when intraProcess=true) */
+	/** HTTP port for the CodexDaemon sidecar. 0 = dynamic (OS-assigned). */
 	daemonPort: number;
 }
 ```
@@ -80,16 +88,16 @@ codex: {
 	maxDeltaBufferBytes: 1_048_576,
 	approvalTimeoutMs: 60_000,
 	intraProcess: false,
-	daemonPort: 21817,
+	daemonPort: 0,
 },
 ```
 
 In `src/config.ts` validateCodexConfig, add:
 
 ```typescript
-// codex.daemonPort must be an integer 1-65535
-if (!Number.isInteger(codex.daemonPort) || codex.daemonPort < 1 || codex.daemonPort > 65535) {
-	throw new ValidationError("codex.daemonPort must be an integer between 1 and 65535", {
+// codex.daemonPort must be an integer 0-65535 (0 = dynamic OS-assigned port)
+if (!Number.isInteger(codex.daemonPort) || codex.daemonPort < 0 || codex.daemonPort > 65535) {
+	throw new ValidationError("codex.daemonPort must be an integer between 0 and 65535", {
 		field: "codex.daemonPort",
 		value: codex.daemonPort,
 	});
@@ -99,8 +107,8 @@ if (!Number.isInteger(codex.daemonPort) || codex.daemonPort < 1 || codex.daemonP
 In `config.yaml.sample`, add after `approvalTimeoutMs`:
 
 ```yaml
-  intraProcess: false
-  daemonPort: 21817
+  intraProcess: false     # false = bridge (per-agent process), true = daemon (sidecar)
+  daemonPort: 0           # 0 = dynamic (OS-assigned), >0 = fixed port
 ```
 
 **Step 4: Run tests to verify they pass**
@@ -112,7 +120,7 @@ Expected: PASS
 
 ```bash
 git add src/types.ts src/config.ts src/config.test.ts config.yaml.sample
-git commit --no-gpg-sign -m "feat: add codex.intraProcess and codex.daemonPort config fields"
+git commit --no-gpg-sign -m "feat: extend AgentRuntime with codex-daemon, add intraProcess + daemonPort config"
 ```
 
 ---
@@ -162,6 +170,18 @@ export interface AgentInspection {
 	tokenUsage?: { input: number; output: number; total: number };
 }
 
+/** Options for nudge delivery */
+export interface NudgeOptions {
+	/** Skip debounce check (required for watchdog escalation nudges) */
+	force?: boolean;
+}
+
+/** Nudge delivery result — preserves watchdog telemetry contract */
+export interface NudgeResult {
+	delivered: boolean;
+	reason?: string;
+}
+
 /**
  * Pluggable agent lifecycle driver.
  *
@@ -176,8 +196,9 @@ export interface AgentDriver {
 	/** Launch an agent. sling handles steps 1-11; driver handles step 12+. */
 	spawn(ctx: SpawnContext): Promise<SpawnResult>;
 
-	/** Indirect: wake agent and have it check mail */
-	nudge(agentName: string, message: string, from: string): Promise<void>;
+	/** Indirect: wake agent and have it check mail.
+	 *  Returns NudgeResult with delivery status for watchdog telemetry. */
+	nudge(agentName: string, message: string, from: string, opts?: NudgeOptions): Promise<NudgeResult>;
 
 	/** Direct: inject a message into the agent's active turn/session.
 	 *  Returns true if delivered, false if no active turn (caller should fall back to mail). */
@@ -189,7 +210,9 @@ export interface AgentDriver {
 	/** Request graceful shutdown of an agent */
 	shutdown(agentName: string): Promise<void>;
 
-	/** Clean up driver-level resources (connections, daemon handles) */
+	/** Clean up driver-level resources (connections, daemon handles).
+	 *  For CodexDaemonDriver: no-op (daemon lifecycle is independent).
+	 *  For ClaudeDriver/CodexBridgeDriver: no-op (nothing to clean up). */
 	close(): Promise<void>;
 }
 ```
@@ -203,12 +226,12 @@ Expected: PASS (types only, no runtime code to break)
 
 ```bash
 git add src/drivers/types.ts
-git commit --no-gpg-sign -m "feat: add AgentDriver interface and supporting types"
+git commit --no-gpg-sign -m "feat: add AgentDriver interface with NudgeOptions/NudgeResult types"
 ```
 
 ---
 
-### Task 3: Create driver resolver
+### Task 3: Create driver resolver (two-path resolution)
 
 **Files:**
 - Create: `src/drivers/resolve.ts`
@@ -218,23 +241,50 @@ git commit --no-gpg-sign -m "feat: add AgentDriver interface and supporting type
 
 ```typescript
 import { describe, expect, test } from "bun:test";
-import { resolveDriverName } from "./resolve";
+import { resolveRuntimeForSpawn, resolveDriverName } from "./resolve";
+
+describe("resolveRuntimeForSpawn", () => {
+	test("returns 'claude' when no codex config", () => {
+		expect(resolveRuntimeForSpawn("builder", { codex: undefined })).toBe("claude");
+	});
+
+	test("returns 'codex' when capability mapped to codex and intraProcess is false", () => {
+		const config = { codex: { defaultRuntime: { builder: "codex" }, intraProcess: false } };
+		expect(resolveRuntimeForSpawn("builder", config)).toBe("codex");
+	});
+
+	test("returns 'codex-daemon' when capability mapped to codex and intraProcess is true", () => {
+		const config = { codex: { defaultRuntime: { builder: "codex" }, intraProcess: true } };
+		expect(resolveRuntimeForSpawn("builder", config)).toBe("codex-daemon");
+	});
+
+	test("runtime flag overrides config", () => {
+		const config = { codex: { defaultRuntime: { builder: "claude" }, intraProcess: false } };
+		expect(resolveRuntimeForSpawn("builder", config, "codex")).toBe("codex");
+	});
+
+	test("runtime flag 'codex' with intraProcess=true still resolves to codex-daemon", () => {
+		const config = { codex: { defaultRuntime: {}, intraProcess: true } };
+		expect(resolveRuntimeForSpawn("builder", config, "codex")).toBe("codex-daemon");
+	});
+
+	test("runtime flag 'codex-daemon' is passed through as-is", () => {
+		const config = { codex: { defaultRuntime: {}, intraProcess: false } };
+		expect(resolveRuntimeForSpawn("builder", config, "codex-daemon")).toBe("codex-daemon");
+	});
+});
 
 describe("resolveDriverName", () => {
 	test("returns 'claude' for runtime 'claude'", () => {
-		expect(resolveDriverName("claude", undefined)).toBe("claude");
+		expect(resolveDriverName("claude")).toBe("claude");
 	});
 
-	test("returns 'codex-bridge' for runtime 'codex' when intraProcess is false", () => {
-		expect(resolveDriverName("codex", { intraProcess: false })).toBe("codex-bridge");
+	test("returns 'codex-bridge' for runtime 'codex'", () => {
+		expect(resolveDriverName("codex")).toBe("codex-bridge");
 	});
 
-	test("returns 'codex-bridge' for runtime 'codex' when codex config is undefined", () => {
-		expect(resolveDriverName("codex", undefined)).toBe("codex-bridge");
-	});
-
-	test("returns 'codex-daemon' for runtime 'codex' when intraProcess is true", () => {
-		expect(resolveDriverName("codex", { intraProcess: true })).toBe("codex-daemon");
+	test("returns 'codex-daemon' for runtime 'codex-daemon'", () => {
+		expect(resolveDriverName("codex-daemon")).toBe("codex-daemon");
 	});
 });
 ```
@@ -246,26 +296,42 @@ Expected: FAIL — module not found
 
 **Step 3: Implement resolver**
 
-Start with just the name resolution (pure function, no driver instantiation yet — drivers don't exist yet):
+Two resolution functions: one for spawn-time (consults config), one for operation-time (reads persisted runtime):
 
 ```typescript
 // src/drivers/resolve.ts
-import type { AgentRuntime } from "../types";
+import type { AgentRuntime, OverstoryConfig } from "../types";
 
 export type DriverName = "claude" | "codex-bridge" | "codex-daemon";
 
 /**
- * Resolve which driver implementation to use based on runtime and config.
- * Pure function — no side effects, no instantiation.
+ * At spawn time: resolve which runtime to persist on the session.
+ * This is the ONLY place where codex.intraProcess is consulted.
+ * The result is stored on session.runtime and used for all future lookups.
  */
-export function resolveDriverName(
-	runtime: AgentRuntime,
-	codexConfig: { intraProcess?: boolean } | undefined,
-): DriverName {
-	if (runtime === "claude") return "claude";
-	// runtime === "codex"
-	if (codexConfig?.intraProcess) return "codex-daemon";
-	return "codex-bridge";
+export function resolveRuntimeForSpawn(
+	capability: string,
+	config: { codex?: { defaultRuntime?: Partial<Record<string, AgentRuntime>>; intraProcess?: boolean } },
+	runtimeFlag?: AgentRuntime,
+): AgentRuntime {
+	const base = runtimeFlag ?? config.codex?.defaultRuntime?.[capability] ?? "claude";
+	// "codex-daemon" flag is explicit — pass through
+	if (base === "codex-daemon") return "codex-daemon";
+	// "codex" + intraProcess=true → upgrade to "codex-daemon"
+	if (base === "codex" && config.codex?.intraProcess) return "codex-daemon";
+	return base;
+}
+
+/**
+ * At operation time: map persisted session.runtime to driver name.
+ * Never consults codex.intraProcess — the session knows which driver spawned it.
+ */
+export function resolveDriverName(runtime: AgentRuntime): DriverName {
+	switch (runtime) {
+		case "claude": return "claude";
+		case "codex": return "codex-bridge";
+		case "codex-daemon": return "codex-daemon";
+	}
 }
 ```
 
@@ -278,12 +344,12 @@ Expected: PASS
 
 ```bash
 git add src/drivers/resolve.ts src/drivers/resolve.test.ts
-git commit --no-gpg-sign -m "feat: add driver name resolver"
+git commit --no-gpg-sign -m "feat: add two-path driver resolver (spawn-time + operation-time)"
 ```
 
 ---
 
-## Phase 2: ClaudeDriver (Extract from sling.ts)
+## Phase 2: ClaudeDriver + CodexBridgeDriver (Extract from sling.ts)
 
 ### Task 4: Create ClaudeDriver with spawn
 
@@ -315,6 +381,28 @@ describe("ClaudeDriver", () => {
 		expect(result.pid).toBe(42);
 		expect(calls[0]).toContain("claude");
 	});
+
+	test("nudge returns NudgeResult with delivered status", async () => {
+		let sentTo = "";
+		const driver = new ClaudeDriver({
+			createSession: async () => 0,
+			sendKeys: async (session) => { sentTo = session; },
+			isSessionAlive: async () => true,
+		});
+		const result = await driver.nudge("test-agent", "hello", "orchestrator");
+		expect(result.delivered).toBe(true);
+	});
+
+	test("nudge with dead tmux returns delivered=false", async () => {
+		const driver = new ClaudeDriver({
+			createSession: async () => 0,
+			sendKeys: async () => {},
+			isSessionAlive: async () => false,
+		});
+		const result = await driver.nudge("test-agent", "hello", "orchestrator");
+		expect(result.delivered).toBe(false);
+		expect(result.reason).toBeDefined();
+	});
 });
 ```
 
@@ -337,7 +425,7 @@ Also extract nudge logic from `nudge.ts:326-344` (`nudgeClaudeAgent`).
 
 ```typescript
 // src/drivers/claude.ts
-import type { AgentDriver, AgentInspection, SpawnContext, SpawnResult } from "./types";
+import type { AgentDriver, AgentInspection, NudgeOptions, NudgeResult, SpawnContext, SpawnResult } from "./types";
 
 export interface ClaudeDriverDeps {
 	createSession: (name: string, cwd: string, cmd: string, env?: Record<string, string>) => Promise<number>;
@@ -362,14 +450,16 @@ export class ClaudeDriver implements AgentDriver {
 		// ... (extracted from sling.ts:536-614)
 	}
 
-	async nudge(agentName: string, message: string, _from: string): Promise<void> {
+	async nudge(agentName: string, message: string, _from: string, opts?: NudgeOptions): Promise<NudgeResult> {
 		// tmux sendKeys with retry (extracted from nudge.ts)
+		// Honor opts.force to skip debounce
+		// Return { delivered, reason } instead of void
 	}
 
 	async steer(agentName: string, input: string): Promise<boolean> {
 		// Same as nudge for Claude (no steer/nudge distinction)
-		await this.nudge(agentName, input, "steer");
-		return true;
+		const result = await this.nudge(agentName, input, "steer");
+		return result.delivered;
 	}
 
 	async inspect(_agentName: string): Promise<AgentInspection> {
@@ -413,7 +503,21 @@ git commit --no-gpg-sign -m "feat: add ClaudeDriver (extracted from sling.ts cla
 
 **Step 1: Write failing tests**
 
-Similar pattern to ClaudeDriver: DI for tmux, startServer, writeAgentsOverlay, writeCodexConfig. Test that spawn calls expected functions with correct args.
+Similar pattern to ClaudeDriver: DI for tmux, startServer, writeAgentsOverlay, writeCodexConfig. Test that spawn calls expected functions with correct args. Nudge must also return NudgeResult.
+
+```typescript
+test("nudge returns NudgeResult after SIGUSR1", async () => {
+	const driver = new CodexBridgeDriver(/* deps with mock kill */);
+	const result = await driver.nudge("test-agent", "check mail", "orchestrator");
+	expect(result.delivered).toBe(true);
+});
+
+test("nudge with force=true skips debounce", async () => {
+	const driver = new CodexBridgeDriver(/* deps */);
+	const result = await driver.nudge("test-agent", "escalation", "watchdog", { force: true });
+	expect(result.delivered).toBe(true);
+});
+```
 
 **Step 2: Run tests to verify they fail**
 
@@ -428,11 +532,11 @@ Extract from `sling.ts:480-534`:
 - `startServer()` call (step 12c)
 - Bridge tmux spawn with env vars (step 12d)
 
-Nudge: extract from `nudge.ts:259-321` (SIGUSR1 + mail).
+Nudge: extract from `nudge.ts:259-321` (SIGUSR1 + mail). Return NudgeResult.
 
 ```typescript
 // src/drivers/codex-bridge.ts
-import type { AgentDriver, SpawnContext, SpawnResult, AgentInspection } from "./types";
+import type { AgentDriver, NudgeOptions, NudgeResult, SpawnContext, SpawnResult, AgentInspection } from "./types";
 
 export interface CodexBridgeDriverDeps {
 	createSession: (name: string, cwd: string, cmd: string, env?: Record<string, string>) => Promise<number>;
@@ -444,6 +548,12 @@ export interface CodexBridgeDriverDeps {
 export class CodexBridgeDriver implements AgentDriver {
 	readonly name = "codex-bridge";
 	constructor(private deps: CodexBridgeDriverDeps) {}
+
+	async nudge(agentName: string, message: string, _from: string, opts?: NudgeOptions): Promise<NudgeResult> {
+		// SIGUSR1 to bridge PID + mail
+		// Honor opts.force to skip debounce
+		// Return { delivered, reason }
+	}
 	// ...
 }
 ```
@@ -459,7 +569,7 @@ git commit --no-gpg-sign -m "feat: add CodexBridgeDriver (extracted from sling.t
 
 ---
 
-## Phase 3: Wire Drivers into sling.ts
+## Phase 3: Wire Drivers into sling.ts + nudge.ts
 
 ### Task 6: Add resolveDriver factory function
 
@@ -467,9 +577,41 @@ git commit --no-gpg-sign -m "feat: add CodexBridgeDriver (extracted from sling.t
 - Modify: `src/drivers/resolve.ts`
 - Modify: `src/drivers/resolve.test.ts`
 
-**Step 1: Extend resolve.ts with full resolveDriver function**
+**Step 1: Extend resolve.ts with full resolveDriver functions**
 
-Add `resolveDriver()` that returns an instantiated `AgentDriver`. Uses `resolveDriverName()` internally. Takes the full config + deps needed to construct each driver.
+Add two factory functions matching the two resolution paths:
+
+```typescript
+import type { AgentDriver } from "./types";
+import type { AgentRuntime, OverstoryConfig } from "../types";
+import { ClaudeDriver } from "./claude";
+import { CodexBridgeDriver } from "./codex-bridge";
+import { CodexDaemonDriver } from "./codex-daemon";
+
+/** At spawn time: config determines runtime, constructs the driver */
+export function resolveDriverForSpawn(
+	capability: string,
+	config: OverstoryConfig,
+	runtimeFlag?: AgentRuntime,
+): { runtime: AgentRuntime; driver: AgentDriver } {
+	const runtime = resolveRuntimeForSpawn(capability, config, runtimeFlag);
+	const driver = resolveDriverForSession(runtime, config);
+	return { runtime, driver };
+}
+
+/** At operation time: session.runtime determines driver */
+export function resolveDriverForSession(runtime: AgentRuntime, config: OverstoryConfig): AgentDriver {
+	const driverName = resolveDriverName(runtime);
+	switch (driverName) {
+		case "claude":
+			return new ClaudeDriver(/* deps from config */);
+		case "codex-bridge":
+			return new CodexBridgeDriver(/* deps from config */);
+		case "codex-daemon":
+			return getCodexDaemonDriver(config); // singleton, reads daemon.json for URL/token
+	}
+}
+```
 
 **Step 2: Test with mock deps**
 
@@ -477,7 +619,7 @@ Add `resolveDriver()` that returns an instantiated `AgentDriver`. Uses `resolveD
 
 ```bash
 git add src/drivers/resolve.ts src/drivers/resolve.test.ts
-git commit --no-gpg-sign -m "feat: add resolveDriver factory with full instantiation"
+git commit --no-gpg-sign -m "feat: add resolveDriverForSpawn + resolveDriverForSession factories"
 ```
 
 ---
@@ -493,10 +635,21 @@ git commit --no-gpg-sign -m "feat: add resolveDriver factory with full instantia
 Currently `sling.ts:442-557` has a try/catch wrapping the runtime fork. Replace the runtime-specific code (lines 445-557) with:
 
 ```typescript
-const driver = resolveDriver(runtime, config);
+// Resolve driver using two-path resolution — persist runtime on session
+const { runtime, driver } = resolveDriverForSpawn(capability, config, runtimeFlag);
+
+// Session is created with the resolved runtime (persisted for operation-time lookups)
+const session = sessionStore.create({
+	agentName,
+	capability,
+	runtime,  // "claude" | "codex" | "codex-daemon"
+	tmuxSession: runtime === "codex-daemon" ? `daemon:${agentName}` : tmuxSessionName,
+	// ... other fields
+});
+
 const result = await driver.spawn({
 	config,
-	session: { /* partially built session */ },
+	session,
 	overlayConfig,
 	worktreePath,
 	branchName,
@@ -505,6 +658,12 @@ const result = await driver.spawn({
 });
 pid = result.pid;
 ```
+
+Key changes:
+- Runtime is resolved via `resolveDriverForSpawn` (replaces inline `resolveRuntime`)
+- Session records `"codex-daemon"` as runtime (not just `"codex"`)
+- `tmuxSession` uses sentinel value `"daemon:<agentName>"` for daemon agents (avoids schema migration, keeps NOT NULL constraint)
+- Driver handles everything from step 12 onward
 
 Keep the try/catch for worktree cleanup on failure.
 
@@ -526,17 +685,17 @@ Run: `bun run typecheck && bun run lint`
 
 ```bash
 git add src/commands/sling.ts src/commands/sling.test.ts
-git commit --no-gpg-sign -m "refactor: replace sling.ts runtime fork with AgentDriver dispatch"
+git commit --no-gpg-sign -m "refactor: replace sling.ts runtime fork with driver dispatch, persist runtime per-session"
 ```
 
 ---
 
-### Task 8: Refactor nudge.ts to use drivers
+### Task 8: Refactor nudge.ts to use driver.nudge()
 
 **Files:**
 - Modify: `src/commands/nudge.ts`
 
-**Step 1: Replace runtime fork in nudgeAgent()**
+**Step 1: Replace runtime fork in nudgeAgent() with driver dispatch**
 
 Currently `nudge.ts:373-376` has:
 
@@ -547,20 +706,25 @@ const result =
 		: await nudgeClaudeAgent(...);
 ```
 
-Replace with driver dispatch. The `nudgeClaudeAgent` and `nudgeCodexAgent` functions can be kept as internal helpers used by the drivers, or extracted into the drivers themselves.
-
-The cleanest approach: keep the nudge module but have it resolve and delegate to the driver:
+Replace with driver dispatch. The `nudgeClaudeAgent` and `nudgeCodexAgent` functions are **moved into** ClaudeDriver.nudge() and CodexBridgeDriver.nudge() respectively (Task 4 and 5). The nudge command becomes a thin wrapper:
 
 ```typescript
-const driver = resolveDriver(target.runtime, config);
-await driver.nudge(agentName, message, from);
+// Look up the session to get persisted runtime
+const session = sessionStore.getByName(agentName);
+if (!session) throw new NudgeError(`No active session for agent: ${agentName}`);
+
+// Resolve driver from persisted session.runtime (never from config)
+const driver = resolveDriverForSession(session.runtime ?? "claude", config);
+
+// Delegate to the driver — all three runtimes handled uniformly
+const result = await driver.nudge(agentName, message, from, { force });
 ```
 
-This requires `nudgeAgent` to load config (it currently doesn't). Alternative: pass the driver in, or keep the existing functions but have them also support "codex-daemon" via HTTP.
+This eliminates all runtime branching in nudge.ts. The driver handles the runtime-specific delivery mechanism (tmux sendKeys, SIGUSR1, HTTP POST).
 
-**Decision:** For minimal disruption, add a `codex-daemon` branch that calls the daemon HTTP API. This aligns with the existing pattern and avoids needing config in nudge.
+**Critical: The nudge return type is now `NudgeResult`** (`{ delivered: boolean; reason?: string }`), matching what the existing code already returns and what the watchdog expects for telemetry.
 
-**Step 2: Run nudge tests if they exist, otherwise run full suite**
+**Step 2: Run full test suite**
 
 Run: `bun test`
 Expected: PASS
@@ -569,14 +733,74 @@ Expected: PASS
 
 ```bash
 git add src/commands/nudge.ts
-git commit --no-gpg-sign -m "refactor: add codex-daemon path to nudge delivery"
+git commit --no-gpg-sign -m "refactor: replace nudge.ts runtime fork with driver.nudge() dispatch"
+```
+
+---
+
+### Task 9: Update watchdog to use driver resolution
+
+**Files:**
+- Modify: `src/watchdog/daemon.ts` (nudge calls)
+- Modify: `src/watchdog/health.ts` (health evaluation)
+
+**Step 1: Update daemon.ts nudge calls**
+
+Currently `daemon.ts:539-543` calls `nudgeAgent()` directly with `force=true`. Update to resolve the driver from the session's persisted runtime:
+
+```typescript
+// Before (daemon.ts:539):
+// const { delivered } = await nudgeAgent(root, agentName, message, true);
+
+// After:
+const session = sessionStore.getByName(agentName);
+const driver = resolveDriverForSession(session?.runtime ?? "claude", config);
+const { delivered, reason } = await driver.nudge(agentName, message, "watchdog", { force: true });
+```
+
+This ensures the watchdog routes nudges correctly for all three runtimes, including codex-daemon agents.
+
+**Step 2: Add runtime-aware health evaluation in health.ts**
+
+Currently ZFC Rule 1 (health.ts:126) kills agents with dead tmux sessions. Add a check before the tmux liveness evaluation:
+
+```typescript
+// Skip tmux liveness for daemon-managed agents — use daemon HTTP health instead
+if (session.runtime === "codex-daemon") {
+	return evaluateDaemonHealth(session, daemonUrl);
+}
+// ... existing tmux check for "claude" and "codex" agents
+```
+
+`evaluateDaemonHealth()` calls `GET /agents/:name` on the daemon and maps the response:
+- Daemon reachable + agent found → use agent state from daemon
+- Daemon reachable + agent not found → zombie (agent lost)
+- Daemon unreachable → zombie (same severity as tmux dead)
+
+Also add a daemon process health check:
+- Read `.overstory/daemon.json` for daemon PID
+- If PID is dead and there are active `codex-daemon` sessions → restart daemon
+
+**Step 3: Write tests**
+
+Test `evaluateDaemonHealth` with a fake Bun.serve daemon and various response scenarios.
+
+**Step 4: Run quality gates**
+
+Run: `bun test && bun run typecheck && bun run lint`
+
+**Step 5: Commit**
+
+```bash
+git add src/watchdog/daemon.ts src/watchdog/health.ts
+git commit --no-gpg-sign -m "feat: runtime-aware watchdog health + driver-based nudge resolution"
 ```
 
 ---
 
 ## Phase 4: Daemon Infrastructure
 
-### Task 9: Create AgentPool
+### Task 10: Create AgentPool
 
 **Files:**
 - Create: `src/codex/daemon/pool.ts`
@@ -616,6 +840,12 @@ describe("AgentPool", () => {
 		expect(result).toBe(false);
 	});
 
+	test("add rejects duplicate agent name", async () => {
+		const pool = createAgentPool({ createRpcClient: async () => mockRpcClient() });
+		await pool.add(makeBridgeConfig({ agentName: "dup" }));
+		expect(pool.add(makeBridgeConfig({ agentName: "dup" }))).rejects.toThrow();
+	});
+
 	test("drain removes all agents", async () => {
 		const pool = createAgentPool({ createRpcClient: async () => mockRpcClient() });
 		await pool.add(makeBridgeConfig({ agentName: "a1" }));
@@ -637,26 +867,24 @@ Expected: FAIL
 // src/codex/daemon/pool.ts
 import type { BridgeConfig } from "../types";
 import type { RpcClient } from "../rpc-client";
-import { createDeltaBufferManager } from "../events";
 
 export interface ManagedAgent {
 	config: BridgeConfig;
 	rpc: RpcClient;
 	threadId: string;
 	activeTurnId: string | null;
-	// ... (per design doc)
 	state: "booting" | "working" | "completed" | "failed";
 }
 
 export interface AgentPoolDeps {
 	createRpcClient: (url: string) => Promise<RpcClient>;
-	// Event/mail store factories for DI
 }
 
 export interface AgentPool {
 	add(config: BridgeConfig): Promise<void>;
 	get(name: string): ManagedAgent | undefined;
 	steer(name: string, input: string): Promise<boolean>;
+	nudge(name: string, message: string, force?: boolean): Promise<{ delivered: boolean; reason?: string }>;
 	remove(name: string): Promise<void>;
 	names(): string[];
 	drain(): Promise<void>;
@@ -682,7 +910,7 @@ git commit --no-gpg-sign -m "feat: add AgentPool for daemon-managed Codex agents
 
 ---
 
-### Task 10: Create daemon HTTP server
+### Task 11: Create daemon HTTP server with bearer token auth
 
 **Files:**
 - Create: `src/codex/daemon/server.ts`
@@ -698,38 +926,69 @@ import { createDaemonServer } from "./server";
 
 describe("DaemonServer", () => {
 	let server: ReturnType<typeof createDaemonServer>;
+	const TOKEN = "test-token-abc123";
 
 	afterEach(() => { server?.stop(); });
 
-	test("GET /health returns 200", async () => {
-		server = createDaemonServer({ port: 0, pool: mockPool() });
+	test("GET /health returns 200 without auth", async () => {
+		server = createDaemonServer({ port: 0, pool: mockPool(), token: TOKEN });
 		const res = await fetch(`${server.url}/health`);
 		expect(res.status).toBe(200);
 	});
 
-	test("GET /agents returns empty array initially", async () => {
-		server = createDaemonServer({ port: 0, pool: mockPool() });
-		const res = await fetch(`${server.url}/agents`);
-		const body = await res.json();
-		expect(body).toEqual([]);
-	});
-
-	test("POST /agents spawns an agent", async () => {
-		const pool = mockPool();
-		server = createDaemonServer({ port: 0, pool });
+	test("POST /agents returns 401 without bearer token", async () => {
+		server = createDaemonServer({ port: 0, pool: mockPool(), token: TOKEN });
 		const res = await fetch(`${server.url}/agents`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(makeBridgeConfig({ agentName: "new-agent" })),
+		});
+		expect(res.status).toBe(401);
+	});
+
+	test("POST /agents returns 201 with valid bearer token", async () => {
+		const pool = mockPool();
+		server = createDaemonServer({ port: 0, pool, token: TOKEN });
+		const res = await fetch(`${server.url}/agents`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"Authorization": `Bearer ${TOKEN}`,
+			},
 			body: JSON.stringify(makeBridgeConfig({ agentName: "new-agent" })),
 		});
 		expect(res.status).toBe(201);
 		expect(pool.addCalls).toBe(1);
 	});
 
+	test("GET /agents returns list without auth (read-only)", async () => {
+		server = createDaemonServer({ port: 0, pool: mockPool(), token: TOKEN });
+		const res = await fetch(`${server.url}/agents`);
+		const body = await res.json();
+		expect(body).toEqual([]);
+	});
+
+	test("POST /agents/:name/nudge with force flag", async () => {
+		const pool = mockPool();
+		server = createDaemonServer({ port: 0, pool, token: TOKEN });
+		const res = await fetch(`${server.url}/agents/test-agent/nudge`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"Authorization": `Bearer ${TOKEN}`,
+			},
+			body: JSON.stringify({ message: "check mail", force: true }),
+		});
+		expect(res.status).toBe(200);
+	});
+
 	test("POST /shutdown drains pool and stops", async () => {
 		const pool = mockPool();
-		server = createDaemonServer({ port: 0, pool });
-		const res = await fetch(`${server.url}/shutdown`, { method: "POST" });
+		server = createDaemonServer({ port: 0, pool, token: TOKEN });
+		const res = await fetch(`${server.url}/shutdown`, {
+			method: "POST",
+			headers: { "Authorization": `Bearer ${TOKEN}` },
+		});
 		expect(res.status).toBe(200);
 		expect(pool.drainCalled).toBe(true);
 	});
@@ -751,37 +1010,92 @@ import type { Server } from "bun";
 export interface DaemonServerOpts {
 	port: number;
 	pool: AgentPool;
+	token: string;
+	hostname?: string; // defaults to "127.0.0.1" (localhost only)
 }
 
 export function createDaemonServer(opts: DaemonServerOpts): Server {
+	const { pool, token, hostname = "127.0.0.1" } = opts;
+
+	function requireAuth(req: Request): Response | null {
+		const auth = req.headers.get("authorization");
+		if (auth !== `Bearer ${token}`) {
+			return new Response("Unauthorized", { status: 401 });
+		}
+		return null;
+	}
+
 	return Bun.serve({
 		port: opts.port,
+		hostname,
 		async fetch(req) {
 			const url = new URL(req.url);
 			const method = req.method;
 
+			// GET /health — unauthenticated liveness check
 			if (url.pathname === "/health" && method === "GET") {
-				return Response.json({ status: "ok" });
+				return Response.json({ status: "ok", agents: pool.names().length });
 			}
 
+			// GET /agents — unauthenticated read-only list
 			if (url.pathname === "/agents" && method === "GET") {
-				return Response.json(opts.pool.names().map(n => ({
+				return Response.json(pool.names().map(n => ({
 					name: n,
-					state: opts.pool.get(n)?.state,
+					state: pool.get(n)?.state,
 				})));
 			}
 
+			// GET /agents/:name — unauthenticated read-only inspect
+			const agentMatch = url.pathname.match(/^\/agents\/([^/]+)$/);
+			if (agentMatch && method === "GET") {
+				const agent = pool.get(agentMatch[1]!);
+				if (!agent) return new Response("Not Found", { status: 404 });
+				return Response.json(agent);
+			}
+
+			// --- Mutation endpoints require bearer token ---
+
 			if (url.pathname === "/agents" && method === "POST") {
+				const authErr = requireAuth(req);
+				if (authErr) return authErr;
 				const config = await req.json();
-				await opts.pool.add(config);
+				await pool.add(config);
 				return new Response(null, { status: 201 });
 			}
 
-			// ... other routes per design doc
+			// POST /agents/:name/nudge
+			const nudgeMatch = url.pathname.match(/^\/agents\/([^/]+)\/nudge$/);
+			if (nudgeMatch && method === "POST") {
+				const authErr = requireAuth(req);
+				if (authErr) return authErr;
+				const body = await req.json() as { message: string; force?: boolean };
+				const result = await pool.nudge(nudgeMatch[1]!, body.message, body.force);
+				return Response.json(result);
+			}
+
+			// POST /agents/:name/steer
+			const steerMatch = url.pathname.match(/^\/agents\/([^/]+)\/steer$/);
+			if (steerMatch && method === "POST") {
+				const authErr = requireAuth(req);
+				if (authErr) return authErr;
+				const body = await req.json() as { input: string };
+				const delivered = await pool.steer(steerMatch[1]!, body.input);
+				return Response.json({ delivered });
+			}
+
+			// DELETE /agents/:name
+			const deleteMatch = url.pathname.match(/^\/agents\/([^/]+)$/);
+			if (deleteMatch && method === "DELETE") {
+				const authErr = requireAuth(req);
+				if (authErr) return authErr;
+				await pool.remove(deleteMatch[1]!);
+				return new Response(null, { status: 204 });
+			}
 
 			if (url.pathname === "/shutdown" && method === "POST") {
-				await opts.pool.drain();
-				// Schedule process exit after response
+				const authErr = requireAuth(req);
+				if (authErr) return authErr;
+				await pool.drain();
 				setTimeout(() => process.exit(0), 100);
 				return Response.json({ status: "shutting_down" });
 			}
@@ -801,29 +1115,29 @@ Expected: PASS
 
 ```bash
 git add src/codex/daemon/server.ts src/codex/daemon/server.test.ts
-git commit --no-gpg-sign -m "feat: add daemon HTTP server with agent pool routes"
+git commit --no-gpg-sign -m "feat: add daemon HTTP server with bearer token auth"
 ```
 
 ---
 
-### Task 11: Create daemon entry point and lifecycle manager
+### Task 12: Create daemon lifecycle manager (start/stop/health with file lock)
 
 **Files:**
-- Create: `src/codex/daemon/main.ts` (entry point, like bridge.ts `import.meta.main`)
 - Create: `src/codex/daemon/lifecycle.ts` (start/stop/health check from CLI side)
 - Create: `src/codex/daemon/lifecycle.test.ts`
 
-**Step 1: Write failing tests for lifecycle**
+**Step 1: Write failing tests**
 
 ```typescript
 import { describe, expect, test } from "bun:test";
-import { parseDaemonState, isDaemonAlive } from "./lifecycle";
+import { parseDaemonState, isDaemonAlive, generateToken } from "./lifecycle";
 
 describe("parseDaemonState", () => {
 	test("parses valid daemon state JSON", () => {
-		const state = parseDaemonState('{"pid":123,"port":21817,"startedAt":"2026-01-01","url":"http://127.0.0.1:21817"}');
+		const state = parseDaemonState('{"pid":123,"port":21817,"startedAt":"2026-01-01","url":"http://127.0.0.1:21817","token":"abc"}');
 		expect(state?.pid).toBe(123);
 		expect(state?.port).toBe(21817);
+		expect(state?.token).toBe("abc");
 	});
 
 	test("returns null for invalid JSON", () => {
@@ -833,25 +1147,92 @@ describe("parseDaemonState", () => {
 
 describe("isDaemonAlive", () => {
 	test("returns false for non-existent PID", () => {
-		expect(isDaemonAlive({ pid: 999999, port: 0, startedAt: "", url: "" })).toBe(false);
+		expect(isDaemonAlive({ pid: 999999, port: 0, startedAt: "", url: "", token: "" })).toBe(false);
+	});
+});
+
+describe("generateToken", () => {
+	test("generates a 32-byte hex token", () => {
+		const token = generateToken();
+		expect(token.length).toBe(64); // 32 bytes = 64 hex chars
+		expect(/^[0-9a-f]+$/.test(token)).toBe(true);
+	});
+
+	test("generates unique tokens", () => {
+		const t1 = generateToken();
+		const t2 = generateToken();
+		expect(t1).not.toBe(t2);
 	});
 });
 ```
 
 **Step 2: Implement lifecycle functions**
 
-Pattern matches `src/codex/server.ts` (readServerState, isServerAlive, startServer, stopServer) but for the daemon process.
+Pattern matches `src/codex/server.ts` (readServerState, isServerAlive, startServer, stopServer) but for the daemon process. Key additions:
+
+```typescript
+// src/codex/daemon/lifecycle.ts
+
+export interface DaemonState {
+	pid: number;
+	port: number;
+	startedAt: string;
+	url: string;
+	token: string;
+}
+
+/** Generate a random 32-byte hex token for daemon auth */
+export function generateToken(): string {
+	const bytes = new Uint8Array(32);
+	crypto.getRandomValues(bytes);
+	return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Race-safe daemon startup using file lock.
+ * Pattern: acquire lock → check daemon.json → start if needed → write daemon.json → release lock.
+ */
+export async function ensureDaemonRunning(overstoryDir: string, config: OverstoryConfig): Promise<DaemonState> {
+	const lockPath = `${overstoryDir}/daemon.lock`;
+	const statePath = `${overstoryDir}/daemon.json`;
+
+	// Acquire file lock (Bun.file + atomic write pattern)
+	// Check if daemon already running
+	const existing = await readDaemonState(statePath);
+	if (existing && isDaemonAlive(existing)) return existing;
+
+	// Start daemon process
+	const token = generateToken();
+	const port = config.codex?.daemonPort ?? 0;
+	const proc = Bun.spawn(["bun", "run", "src/codex/daemon/main.ts"], {
+		cwd: /* repo root */,
+		env: {
+			OVERSTORY_DIR: overstoryDir,
+			OVERSTORY_DAEMON_PORT: String(port),
+			OVERSTORY_DAEMON_TOKEN: token,
+			OVERSTORY_CODEX_SERVER_URL: `ws://127.0.0.1:${config.codex?.serverPort ?? 21816}`,
+		},
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+
+	// Wait for daemon to write state file, read actual port
+	// Write daemon.json with mode 0600
+	// Release lock
+}
+```
 
 **Step 3: Implement daemon entry point (main.ts)**
 
 ```typescript
 // src/codex/daemon/main.ts
 // Entry point for the daemon sidecar process.
-// Spawned by CodexDaemonDriver on first agent spawn.
+// Spawned by ensureDaemonRunning on first agent spawn.
 if (import.meta.main) {
-	const port = Number(process.env.OVERSTORY_DAEMON_PORT ?? "21817");
+	const port = Number(process.env.OVERSTORY_DAEMON_PORT ?? "0");
 	const overstoryDir = process.env.OVERSTORY_DIR ?? "";
 	const serverUrl = process.env.OVERSTORY_CODEX_SERVER_URL ?? "ws://127.0.0.1:21816";
+	const token = process.env.OVERSTORY_DAEMON_TOKEN ?? "";
 	// Create pool, start server, write state file
 }
 ```
@@ -862,14 +1243,14 @@ if (import.meta.main) {
 
 ```bash
 git add src/codex/daemon/main.ts src/codex/daemon/lifecycle.ts src/codex/daemon/lifecycle.test.ts
-git commit --no-gpg-sign -m "feat: add daemon lifecycle manager and entry point"
+git commit --no-gpg-sign -m "feat: add daemon lifecycle manager with file lock + bearer token"
 ```
 
 ---
 
 ## Phase 5: CodexDaemonDriver
 
-### Task 12: Create CodexDaemonDriver
+### Task 13: Create CodexDaemonDriver
 
 **Files:**
 - Create: `src/drivers/codex-daemon.ts`
@@ -877,7 +1258,7 @@ git commit --no-gpg-sign -m "feat: add daemon lifecycle manager and entry point"
 
 **Step 1: Write failing tests**
 
-Mock the HTTP calls to the daemon:
+Mock the HTTP calls to the daemon using a real Bun.serve as a fake:
 
 ```typescript
 import { describe, expect, test } from "bun:test";
@@ -885,17 +1266,18 @@ import { CodexDaemonDriver } from "./codex-daemon";
 
 describe("CodexDaemonDriver", () => {
 	test("name is 'codex-daemon'", () => {
-		const driver = new CodexDaemonDriver({ daemonUrl: "http://localhost:0" });
+		const driver = new CodexDaemonDriver({ daemonUrl: "http://localhost:0", token: "test" });
 		expect(driver.name).toBe("codex-daemon");
 	});
 
-	test("spawn POSTs to /agents", async () => {
+	test("spawn calls ensureDaemonRunning then POSTs to /agents", async () => {
 		let posted = false;
-		// Use a real Bun.serve on port 0 as a fake daemon
 		const fakeDaemon = Bun.serve({
 			port: 0,
 			fetch(req) {
 				if (req.method === "POST" && new URL(req.url).pathname === "/agents") {
+					// Verify bearer token
+					expect(req.headers.get("authorization")).toBe("Bearer test-token");
 					posted = true;
 					return new Response(JSON.stringify({ pid: 42 }), { status: 201 });
 				}
@@ -903,7 +1285,13 @@ describe("CodexDaemonDriver", () => {
 			},
 		});
 		try {
-			const driver = new CodexDaemonDriver({ daemonUrl: `http://localhost:${fakeDaemon.port}` });
+			const driver = new CodexDaemonDriver({
+				daemonUrl: `http://localhost:${fakeDaemon.port}`,
+				token: "test-token",
+				ensureDaemonRunning: async () => ({
+					pid: 1, port: fakeDaemon.port, startedAt: "", url: `http://localhost:${fakeDaemon.port}`, token: "test-token",
+				}),
+			});
 			const result = await driver.spawn(makeSpawnContext());
 			expect(posted).toBe(true);
 			expect(result.pid).toBe(42);
@@ -912,12 +1300,75 @@ describe("CodexDaemonDriver", () => {
 		}
 	});
 
-	test("steer POSTs to /agents/:name/steer", async () => {
-		// Similar pattern with fake daemon server
+	test("nudge returns NudgeResult from daemon", async () => {
+		const fakeDaemon = Bun.serve({
+			port: 0,
+			fetch(req) {
+				if (req.method === "POST" && new URL(req.url).pathname.endsWith("/nudge")) {
+					return Response.json({ delivered: true });
+				}
+				return new Response("Not Found", { status: 404 });
+			},
+		});
+		try {
+			const driver = new CodexDaemonDriver({
+				daemonUrl: `http://localhost:${fakeDaemon.port}`,
+				token: "t",
+			});
+			const result = await driver.nudge("test-agent", "hello", "orch");
+			expect(result.delivered).toBe(true);
+		} finally {
+			fakeDaemon.stop();
+		}
 	});
 
-	test("shutdown DELETEs /agents/:name", async () => {
-		// Similar pattern
+	test("nudge passes force flag to daemon", async () => {
+		let receivedForce = false;
+		const fakeDaemon = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				if (req.method === "POST" && new URL(req.url).pathname.endsWith("/nudge")) {
+					const body = await req.json() as { force?: boolean };
+					receivedForce = body.force === true;
+					return Response.json({ delivered: true });
+				}
+				return new Response("Not Found", { status: 404 });
+			},
+		});
+		try {
+			const driver = new CodexDaemonDriver({
+				daemonUrl: `http://localhost:${fakeDaemon.port}`,
+				token: "t",
+			});
+			await driver.nudge("test-agent", "escalation", "watchdog", { force: true });
+			expect(receivedForce).toBe(true);
+		} finally {
+			fakeDaemon.stop();
+		}
+	});
+
+	test("close is a no-op (does not POST /shutdown)", async () => {
+		let shutdownCalled = false;
+		const fakeDaemon = Bun.serve({
+			port: 0,
+			fetch(req) {
+				if (new URL(req.url).pathname === "/shutdown") {
+					shutdownCalled = true;
+					return Response.json({ status: "shutting_down" });
+				}
+				return new Response("Not Found", { status: 404 });
+			},
+		});
+		try {
+			const driver = new CodexDaemonDriver({
+				daemonUrl: `http://localhost:${fakeDaemon.port}`,
+				token: "t",
+			});
+			await driver.close();
+			expect(shutdownCalled).toBe(false);
+		} finally {
+			fakeDaemon.stop();
+		}
 	});
 });
 ```
@@ -931,37 +1382,53 @@ Expected: FAIL
 
 ```typescript
 // src/drivers/codex-daemon.ts
-import type { AgentDriver, AgentInspection, SpawnContext, SpawnResult } from "./types";
-import { ensureDaemonRunning } from "../codex/daemon/lifecycle";
+import type { AgentDriver, AgentInspection, NudgeOptions, NudgeResult, SpawnContext, SpawnResult } from "./types";
+import { ensureDaemonRunning, type DaemonState } from "../codex/daemon/lifecycle";
 import { writeAgentsOverlay } from "../codex/overlay";
-import { writeCodexConfig } from "../codex/config-gen";
 
 export interface CodexDaemonDriverOpts {
 	daemonUrl: string;
+	token: string;
+	/** Injected for testing — defaults to the real ensureDaemonRunning */
+	ensureDaemonRunning?: (overstoryDir: string, config: any) => Promise<DaemonState>;
 }
 
 export class CodexDaemonDriver implements AgentDriver {
 	readonly name = "codex-daemon";
 	private daemonUrl: string;
+	private token: string;
+	private _ensureDaemonRunning: CodexDaemonDriverOpts["ensureDaemonRunning"];
 
 	constructor(opts: CodexDaemonDriverOpts) {
 		this.daemonUrl = opts.daemonUrl;
+		this.token = opts.token;
+		this._ensureDaemonRunning = opts.ensureDaemonRunning ?? ensureDaemonRunning;
+	}
+
+	private authHeaders(): Record<string, string> {
+		return {
+			"Content-Type": "application/json",
+			"Authorization": `Bearer ${this.token}`,
+		};
 	}
 
 	async spawn(ctx: SpawnContext): Promise<SpawnResult> {
+		// Step 0: Ensure daemon is running (race-safe with file lock)
+		const daemonState = await this._ensureDaemonRunning!(
+			ctx.config.project.overstoryDir,
+			ctx.config,
+		);
+		// Update URL/token from actual daemon state (port may be dynamic)
+		this.daemonUrl = daemonState.url;
+		this.token = daemonState.token;
+
 		// Write AGENTS.md overlay
 		await writeAgentsOverlay(ctx.worktreePath, ctx.overlayConfig, ctx.config.project.root);
-		// Write .codex/config.toml
-		const codexConfig = ctx.config.codex!;
-		await writeCodexConfig(ctx.worktreePath, {
-			model: codexConfig.model,
-			approvalPolicy: "on-request",
-		});
 
 		// POST to daemon
 		const res = await fetch(`${this.daemonUrl}/agents`, {
 			method: "POST",
-			headers: { "Content-Type": "application/json" },
+			headers: this.authHeaders(),
 			body: JSON.stringify({
 				agentName: ctx.session.agentName,
 				worktreePath: ctx.worktreePath,
@@ -979,18 +1446,22 @@ export class CodexDaemonDriver implements AgentDriver {
 		return { pid: body.pid };
 	}
 
-	async nudge(agentName: string, message: string, _from: string): Promise<void> {
-		await fetch(`${this.daemonUrl}/agents/${agentName}/nudge`, {
+	async nudge(agentName: string, message: string, _from: string, opts?: NudgeOptions): Promise<NudgeResult> {
+		const res = await fetch(`${this.daemonUrl}/agents/${agentName}/nudge`, {
 			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ message }),
+			headers: this.authHeaders(),
+			body: JSON.stringify({ message, force: opts?.force }),
 		});
+		if (!res.ok) {
+			return { delivered: false, reason: `HTTP ${res.status}` };
+		}
+		return res.json() as Promise<NudgeResult>;
 	}
 
 	async steer(agentName: string, input: string): Promise<boolean> {
 		const res = await fetch(`${this.daemonUrl}/agents/${agentName}/steer`, {
 			method: "POST",
-			headers: { "Content-Type": "application/json" },
+			headers: this.authHeaders(),
 			body: JSON.stringify({ input }),
 		});
 		if (!res.ok) return false;
@@ -1004,11 +1475,15 @@ export class CodexDaemonDriver implements AgentDriver {
 	}
 
 	async shutdown(agentName: string): Promise<void> {
-		await fetch(`${this.daemonUrl}/agents/${agentName}`, { method: "DELETE" });
+		await fetch(`${this.daemonUrl}/agents/${agentName}`, {
+			method: "DELETE",
+			headers: this.authHeaders(),
+		});
 	}
 
 	async close(): Promise<void> {
-		await fetch(`${this.daemonUrl}/shutdown`, { method: "POST" });
+		// No-op. Daemon lifetime is independent of driver instances.
+		// Daemon is stopped by: overstory daemon stop, overstory clean, or self-drain.
 	}
 }
 ```
@@ -1022,44 +1497,52 @@ Expected: PASS
 
 ```bash
 git add src/drivers/codex-daemon.ts src/drivers/codex-daemon.test.ts
-git commit --no-gpg-sign -m "feat: add CodexDaemonDriver (HTTP client to sidecar daemon)"
+git commit --no-gpg-sign -m "feat: add CodexDaemonDriver with ensureDaemonRunning + bearer auth"
 ```
 
 ---
 
-## Phase 6: Integration
+## Phase 6: Integration + CLI
 
-### Task 13: Wire CodexDaemonDriver into resolveDriver
+### Task 14: Wire CodexDaemonDriver into resolveDriver
 
 **Files:**
 - Modify: `src/drivers/resolve.ts`
 - Modify: `src/drivers/resolve.test.ts`
 
-Add the full `resolveDriver()` function that instantiates all three drivers. The `codex-daemon` path needs the daemon URL from config.
-
-**Step 1: Update resolve.ts**
+Add the full `resolveDriverForSession()` function that instantiates all three drivers. The `codex-daemon` path reads `daemon.json` for URL/token:
 
 ```typescript
-export function resolveDriver(runtime: AgentRuntime, config: OverstoryConfig): AgentDriver {
-	const driverName = resolveDriverName(runtime, config.codex);
+export function resolveDriverForSession(runtime: AgentRuntime, config: OverstoryConfig): AgentDriver {
+	const driverName = resolveDriverName(runtime);
 	switch (driverName) {
 		case "claude":
 			return new ClaudeDriver(/* deps */);
 		case "codex-bridge":
 			return new CodexBridgeDriver(/* deps */);
 		case "codex-daemon": {
-			const port = config.codex?.daemonPort ?? 21817;
-			return new CodexDaemonDriver({ daemonUrl: `http://127.0.0.1:${port}` });
+			// Read daemon state for URL and token
+			const state = readDaemonStateSync(config.project.overstoryDir);
+			if (!state) throw new Error("Codex daemon not running — cannot resolve codex-daemon driver");
+			return new CodexDaemonDriver({
+				daemonUrl: state.url,
+				token: state.token,
+			});
 		}
 	}
 }
 ```
 
-**Step 2: Test + commit**
+**Step 1: Test + commit**
+
+```bash
+git add src/drivers/resolve.ts src/drivers/resolve.test.ts
+git commit --no-gpg-sign -m "feat: wire CodexDaemonDriver into resolveDriverForSession"
+```
 
 ---
 
-### Task 14: Add daemon command to CLI
+### Task 15: Add daemon command to CLI
 
 **Files:**
 - Create: `src/commands/daemon.ts`
@@ -1069,9 +1552,11 @@ Add `overstory daemon start|stop|status` command, following the pattern of `coor
 
 ```
 overstory daemon start   # Start the daemon sidecar
-overstory daemon stop    # Stop the daemon
-overstory daemon status  # Show daemon state (pid, port, agents)
+overstory daemon stop    # Stop the daemon (force-drains agents)
+overstory daemon status  # Show daemon state (pid, port, agents, token masked)
 ```
+
+Start calls `ensureDaemonRunning()`. Stop sends `POST /shutdown` with bearer token. Status reads `daemon.json` and pings `/health`.
 
 **Step 1: Implement + test**
 
@@ -1084,7 +1569,38 @@ git commit --no-gpg-sign -m "feat: add overstory daemon start/stop/status comman
 
 ---
 
-### Task 15: Quality gates + final integration check
+### Task 16: Failure-mode tests
+
+**Files:**
+- Create: `src/drivers/codex-daemon.integration.ts` (integration tests)
+- Add tests to existing test files
+
+**Test scenarios (from design doc §P2 Additional Test Scenarios):**
+
+1. **Concurrent /agents POST**: Two parallel spawn calls must not create duplicate agents. Test with `Promise.all`.
+2. **Mixed bridge+daemon fleet**: Spawn one `codex` (bridge) and one `codex-daemon` agent. Verify nudge/inspect routes correctly to each backend based on persisted `session.runtime`.
+3. **Daemon crash mid-turn**: Kill daemon PID during an active turn. Verify watchdog detects + restarts, agents recover from checkpoint.
+4. **Config flip during active sessions**: Change `intraProcess` while agents are running. Verify existing agents continue working (routing uses persisted runtime, not config).
+5. **Token validation**: Requests without valid bearer token return 401 on mutation endpoints. GET /health and GET /agents work without auth.
+6. **Port race**: Two sling calls racing to start daemon. Verify file lock prevents double-start.
+
+**Step 1: Write tests**
+
+**Step 2: Run tests**
+
+Run: `bun test`
+Expected: PASS
+
+**Step 3: Commit**
+
+```bash
+git add src/drivers/codex-daemon.integration.ts
+git commit --no-gpg-sign -m "test: add failure-mode integration tests for daemon driver"
+```
+
+---
+
+### Task 17: Quality gates + final integration check
 
 **Step 1: Run full test suite**
 
@@ -1114,47 +1630,74 @@ git commit --no-gpg-sign -m "chore: fix lint/type issues from driver integration
 
 | File | Action | Description |
 |------|--------|-------------|
-| `src/types.ts` | Modify | Add `intraProcess` + `daemonPort` to CodexConfig |
-| `src/config.ts` | Modify | Add defaults + validation for new fields |
+| `src/types.ts` | Modify | Extend `AgentRuntime` with `"codex-daemon"`, add `intraProcess` + `daemonPort` to CodexConfig |
+| `src/config.ts` | Modify | Add defaults (daemonPort=0) + validation for new fields |
 | `src/config.test.ts` | Modify | Tests for new config fields |
 | `config.yaml.sample` | Modify | Add new fields with comments |
-| `src/drivers/types.ts` | Create | AgentDriver interface + supporting types |
-| `src/drivers/resolve.ts` | Create | Driver resolution factory |
+| `src/drivers/types.ts` | Create | AgentDriver interface + NudgeOptions/NudgeResult + supporting types |
+| `src/drivers/resolve.ts` | Create | Two-path driver resolution (spawn-time + operation-time) |
 | `src/drivers/resolve.test.ts` | Create | Resolution tests |
 | `src/drivers/claude.ts` | Create | ClaudeDriver (extracted from sling.ts) |
 | `src/drivers/claude.test.ts` | Create | ClaudeDriver tests |
 | `src/drivers/codex-bridge.ts` | Create | CodexBridgeDriver (extracted from sling.ts) |
 | `src/drivers/codex-bridge.test.ts` | Create | CodexBridgeDriver tests |
-| `src/drivers/codex-daemon.ts` | Create | CodexDaemonDriver (HTTP client) |
+| `src/drivers/codex-daemon.ts` | Create | CodexDaemonDriver (HTTP client with bearer auth + ensureDaemonRunning) |
 | `src/drivers/codex-daemon.test.ts` | Create | CodexDaemonDriver tests |
 | `src/codex/daemon/pool.ts` | Create | AgentPool for managed agents |
 | `src/codex/daemon/pool.test.ts` | Create | Pool tests (mock RPC) |
-| `src/codex/daemon/server.ts` | Create | Daemon HTTP server (Bun.serve) |
+| `src/codex/daemon/server.ts` | Create | Daemon HTTP server (Bun.serve, bearer auth, localhost-only) |
 | `src/codex/daemon/server.test.ts` | Create | Server tests (real Bun.serve) |
 | `src/codex/daemon/main.ts` | Create | Daemon entry point |
-| `src/codex/daemon/lifecycle.ts` | Create | Start/stop/health for daemon process |
+| `src/codex/daemon/lifecycle.ts` | Create | Start/stop/health for daemon process (file lock, token gen) |
 | `src/codex/daemon/lifecycle.test.ts` | Create | Lifecycle tests |
-| `src/commands/sling.ts` | Modify | Replace if/else with driver.spawn() |
-| `src/commands/nudge.ts` | Modify | Add codex-daemon nudge path |
+| `src/commands/sling.ts` | Modify | Replace if/else with driver.spawn(), persist resolved runtime, use tmux sentinel |
+| `src/commands/nudge.ts` | Modify | Replace if/else with driver.nudge() dispatch |
 | `src/commands/daemon.ts` | Create | CLI command for daemon management |
 | `src/index.ts` | Modify | Route daemon subcommand |
+| `src/sessions/store.ts` | Modify | Accept tmux sentinel `"daemon:<name>"` for daemon agents |
+| `src/watchdog/health.ts` | Modify | Runtime-aware health (skip tmux for codex-daemon, use daemon HTTP) |
+| `src/watchdog/daemon.ts` | Modify | Resolve driver from session.runtime for nudge calls |
+| `src/drivers/codex-daemon.integration.ts` | Create | Failure-mode integration tests |
 
 ## Execution Order
 
 Tasks are ordered for incremental buildability. Each task produces passing tests before moving on.
 
-1. Config types (foundation — everything depends on this)
-2. AgentDriver interface (types only — no runtime code)
-3. Driver resolver (pure function — no deps)
+1. Config types + AgentRuntime extension (foundation — everything depends on this)
+2. AgentDriver interface with NudgeOptions/NudgeResult (types only — no runtime code)
+3. Two-path driver resolver (pure functions — no deps)
 4. ClaudeDriver (extraction — largest task)
 5. CodexBridgeDriver (extraction — mirrors task 4)
-6. Resolve factory (wires drivers together)
-7. Sling refactor (uses drivers)
-8. Nudge refactor (uses drivers)
-9. AgentPool (daemon core)
-10. Daemon HTTP server
-11. Daemon lifecycle + entry point
-12. CodexDaemonDriver (HTTP client)
-13. Wire into resolver
-14. CLI command
-15. Quality gates
+6. Resolve factory with full driver instantiation
+7. Sling refactor (uses drivers, persists runtime per-session, tmux sentinel)
+8. Nudge refactor (uses driver.nudge() — no more runtime branching)
+9. Watchdog updates (runtime-aware health + driver-based nudge)
+10. AgentPool (daemon core)
+11. Daemon HTTP server (bearer auth, localhost binding)
+12. Daemon lifecycle + entry point (file lock, token gen)
+13. CodexDaemonDriver (HTTP client with ensureDaemonRunning)
+14. Wire into resolver
+15. CLI command
+16. Failure-mode integration tests
+17. Quality gates
+
+## Rollout Plan
+
+**Phase A: Driver Extraction (no behavior change)**
+- Tasks 1-8: Extract drivers, wire into sling/nudge. `intraProcess` defaults to `false`.
+- All existing tests pass. No new runtime code activated.
+- Ship and validate. This is the safe rollback point.
+
+**Phase B: Daemon Infrastructure (behind flag)**
+- Tasks 9-15: Build daemon pool, server, lifecycle. Add CodexDaemonDriver.
+- `intraProcess: false` by default. Daemon code exists but is never activated.
+- Ship. No behavior change for anyone.
+
+**Phase C: Opt-in Daemon Mode**
+- Set `intraProcess: true` in a single test project.
+- Run mixed fleet (some bridge, some daemon) to validate interop.
+- Canary criteria: zero zombie misclassifications, approval latency <500ms, daemon uptime >99%.
+
+**Phase D: Default Flip**
+- Change default to `intraProcess: true` after canary passes for 1 week.
+- Rollback trigger: any daemon crash that loses agent progress, or zombie misclassification.
