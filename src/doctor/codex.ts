@@ -20,7 +20,7 @@ export const checkCodex: DoctorCheckFn = async (config, overstoryDir): Promise<D
 	});
 
 	// Check server state if codex is enabled
-	if (config.codex.enabled) {
+	if (config.codex?.enabled) {
 		const state = await readServerState(overstoryDir);
 		if (state) {
 			const alive = isServerAlive(state);

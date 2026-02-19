@@ -30,7 +30,7 @@ import { writeCodexConfig } from "../codex/config-gen.ts";
 import { writeAgentsOverlay } from "../codex/overlay.ts";
 import { startServer } from "../codex/server.ts";
 import { loadConfig } from "../config.ts";
-import { AgentError, HierarchyError, ValidationError } from "../errors.ts";
+import { AgentError, ConfigError, HierarchyError, ValidationError } from "../errors.ts";
 import { createMulchClient } from "../mulch/client.ts";
 import { openSessionStore } from "../sessions/compat.ts";
 import { createRunStore } from "../sessions/store.ts";
@@ -274,7 +274,7 @@ export async function slingCommand(args: string[]): Promise<void> {
 	// 1b. Resolve runtime: --runtime flag > per-capability default from config > "claude"
 	const runtime: AgentRuntime = resolveRuntime(
 		runtimeFlag,
-		config.codex.defaultRuntime[capability],
+		config.codex?.defaultRuntime[capability],
 	);
 
 	// 2. Validate depth limit
@@ -478,17 +478,24 @@ export async function slingCommand(args: string[]): Promise<void> {
 
 			// 12. Create tmux session — path forks based on resolved runtime
 			if (runtime === "codex") {
+				if (!config.codex) {
+					throw new ConfigError("codex section is required in config when using runtime: codex", {
+						field: "codex",
+					});
+				}
+				const codexConfig = config.codex;
+
 				// 12a. Write AGENTS.md overlay (Codex uses AGENTS.md, not .claude/CLAUDE.md)
 				await writeAgentsOverlay(worktreePath, overlayConfig, config.project.root);
 
 				// 12b. Write .codex/config.toml
 				await writeCodexConfig(worktreePath, {
-					model: config.codex.model,
+					model: codexConfig.model,
 					approvalPolicy: "on-request",
 				});
 
 				// 12c. Ensure the shared Codex App Server is running
-				const serverState = await startServer(overstoryDir, config.codex.serverPort);
+				const serverState = await startServer(overstoryDir, codexConfig.serverPort);
 
 				// 12d. Spawn the bridge process in a tmux session
 				// The bridge connects to the App Server and drives the Codex agent lifecycle.
@@ -501,10 +508,10 @@ export async function slingCommand(args: string[]): Promise<void> {
 					OVERSTORY_AGENT_NAME: name,
 					OVERSTORY_WORKTREE_PATH: worktreePath,
 					OVERSTORY_CODEX_SERVER_URL: serverState.url,
-					OVERSTORY_CODEX_MODEL: config.codex.model,
-					OVERSTORY_COMPACTION_THRESHOLD: String(config.codex.compactionThreshold),
-					OVERSTORY_MAX_DELTA_BUFFER: String(config.codex.maxDeltaBufferBytes),
-					OVERSTORY_APPROVAL_TIMEOUT: String(config.codex.approvalTimeoutMs),
+					OVERSTORY_CODEX_MODEL: codexConfig.model,
+					OVERSTORY_COMPACTION_THRESHOLD: String(codexConfig.compactionThreshold),
+					OVERSTORY_MAX_DELTA_BUFFER: String(codexConfig.maxDeltaBufferBytes),
+					OVERSTORY_APPROVAL_TIMEOUT: String(codexConfig.approvalTimeoutMs),
 					OVERSTORY_FILE_SCOPE: overlayConfig.fileScope.join(","),
 					OVERSTORY_PROJECT_ROOT: config.project.root,
 					OVERSTORY_BRANCH_NAME: branchName,

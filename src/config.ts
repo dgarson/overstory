@@ -439,6 +439,7 @@ function validateConfig(config: OverstoryConfig): void {
 
 	// codex config validation (only when codex section is present)
 	const { codex } = config;
+	if (!codex) return;
 
 	// codex.serverPort must be an integer 1-65535
 	if (!Number.isInteger(codex.serverPort) || codex.serverPort < 1 || codex.serverPort > 65535) {

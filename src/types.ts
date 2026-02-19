@@ -42,7 +42,7 @@ export interface OverstoryConfig {
 		verbose: boolean;
 		redactSecrets: boolean;
 	};
-	codex: CodexConfig;
+	codex?: CodexConfig;
 }
 
 export interface CodexConfig {

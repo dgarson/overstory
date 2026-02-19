@@ -11,7 +11,7 @@ import type { OverlayConfig } from "../types";
 
 function getTemplatePath(): string {
 	// src/codex/overlay.ts -> repo root is ../../
-	return resolve(join(import.meta.dir, "../../templates/agents-overlay.md.tmpl"));
+	return resolve(join(import.meta.dir, "../../templates/overlay.md.tmpl"));
 }
 
 /**

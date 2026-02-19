@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentRuntime, AgentSession, AgentState, InsertRun, Run, RunStore } from "../types.ts";
+import type { AgentSession, AgentState, InsertRun, Run, RunStore } from "../types.ts";
 import { createRunStore, createSessionStore, type SessionStore } from "./store.ts";
 
 let tempDir: string;

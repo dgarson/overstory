@@ -53,15 +53,67 @@ export async function readServerState(overstoryDir: string): Promise<CodexServer
 	return parseServerState(raw);
 }
 
+/**
+ * Probe for a running `codex app-server` process via pgrep and extract its
+ * listen URL from the command line arguments.
+ *
+ * Returns a CodexServerState with pid=0 (sentinel: external server, do not
+ * kill) if found, or null if no external server is detected.
+ */
+export async function discoverExternalServer(): Promise<CodexServerState | null> {
+	// pgrep -fa <pattern>: match against full command line, print pid + args.
+	// Works on macOS and Linux. Exits 1 when no match found.
+	const proc = Bun.spawn(["pgrep", "-fa", "codex"], {
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const exitCode = await proc.exited;
+	if (exitCode !== 0) return null;
+
+	const stdout = await new Response(proc.stdout).text();
+	for (const line of stdout.trim().split("\n")) {
+		if (!line.includes("app-server")) continue;
+		const listenMatch = line.match(/--listen\s+(\S+)/);
+		const url = listenMatch?.[1];
+		if (!url) continue;
+		// URL format: ws://127.0.0.1:<port>
+		const portMatch = url.match(/:(\d+)$/);
+		const portStr = portMatch?.[1];
+		if (!portStr) continue;
+		return {
+			pid: 0, // sentinel: external server, stopServer will leave it alone
+			port: Number(portStr),
+			startedAt: new Date().toISOString(),
+			url,
+		};
+	}
+	return null;
+}
+
 /** Start the shared Codex App Server */
-export async function startServer(overstoryDir: string, port: number): Promise<CodexServerState> {
-	// Check if already running
+export async function startServer(
+	overstoryDir: string,
+	port: number,
+	useAvailableServer = true,
+): Promise<CodexServerState> {
+	// 1. Check state file from a server we previously started.
 	const existing = await readServerState(overstoryDir);
 	if (existing && isServerAlive(existing)) {
 		return existing;
 	}
 
-	// Spawn: codex app-server --listen ws://127.0.0.1:<port>
+	// 2. Probe for an externally started server before attempting to bind.
+	//    This gives us the actual listening port rather than assuming our
+	//    configured default is correct.
+	//    Skipped when useAvailableServer=false (caller wants a fresh server on the configured port).
+	if (useAvailableServer) {
+		const external = await discoverExternalServer();
+		if (external) {
+			return external;
+		}
+	}
+
+	// 3. No server found — spawn one on the configured port.
 	const url = `ws://127.0.0.1:${port}`;
 	const proc = Bun.spawn(["codex", "app-server", "--listen", url], {
 		stdout: "pipe",
@@ -78,9 +130,8 @@ export async function startServer(overstoryDir: string, port: number): Promise<C
 
 	if (exited !== null) {
 		const stderr = await new Response(proc.stderr).text();
-		// Port already in use: an existing server we didn't start is running.
-		// Return its URL without writing codex-server.json — stopServer will
-		// never find a state file for it and will leave it alone.
+		// discoverExternalServer() should have caught this case, but handle it
+		// defensively in case there's a race between discovery and bind.
 		if (stderr.includes("Address already in use")) {
 			return { pid: 0, port, startedAt: new Date().toISOString(), url };
 		}

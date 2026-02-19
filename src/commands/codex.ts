@@ -12,7 +12,7 @@
 import { join } from "node:path";
 import { isServerAlive, readServerState, startServer, stopServer } from "../codex/server.ts";
 import { loadConfig } from "../config.ts";
-import { ValidationError } from "../errors.ts";
+import { ConfigError, ValidationError } from "../errors.ts";
 
 function hasFlag(args: string[], flag: string): boolean {
 	return args.includes(flag);
@@ -30,6 +30,11 @@ async function startCodexServer(args: string[]): Promise<void> {
 	const json = hasFlag(args, "--json");
 	const cwd = process.cwd();
 	const config = await loadConfig(cwd);
+	if (!config.codex) {
+		throw new ConfigError("codex section is required in config to manage the app server", {
+			field: "codex",
+		});
+	}
 	const overstoryDir = join(config.project.root, ".overstory");
 	const port = config.codex.serverPort;
 
