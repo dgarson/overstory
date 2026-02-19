@@ -17,7 +17,9 @@ export type DriverName = "claude" | "codex-bridge" | "codex-daemon";
  */
 export function resolveRuntimeForSpawn(
 	capability: string,
-	config: { codex?: { defaultRuntime?: Partial<Record<string, AgentRuntime>>; intraProcess?: boolean } },
+	config: {
+		codex?: { defaultRuntime?: Partial<Record<string, AgentRuntime>>; intraProcess?: boolean };
+	},
 	runtimeFlag?: AgentRuntime,
 ): AgentRuntime {
 	const base = runtimeFlag ?? config.codex?.defaultRuntime?.[capability] ?? "claude";
