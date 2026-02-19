@@ -21,6 +21,47 @@ import type {
 
 const DEBOUNCE_MS = 500;
 
+/**
+ * Check debounce state for an agent using a file-persisted nudge-state.json.
+ * Mirrors the isDebounced() logic in nudge.ts for cross-call persistence.
+ */
+async function isDebounced(statePath: string, agentName: string): Promise<boolean> {
+	const file = Bun.file(statePath);
+	if (!(await file.exists())) {
+		return false;
+	}
+	try {
+		const text = await file.text();
+		const state = JSON.parse(text) as Record<string, number>;
+		const lastNudge = state[agentName];
+		if (lastNudge === undefined) {
+			return false;
+		}
+		return Date.now() - lastNudge < DEBOUNCE_MS;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Record a nudge timestamp to file-persisted nudge-state.json.
+ * Mirrors the recordNudge() logic in nudge.ts.
+ */
+async function recordNudge(statePath: string, agentName: string): Promise<void> {
+	let state: Record<string, number> = {};
+	const file = Bun.file(statePath);
+	if (await file.exists()) {
+		try {
+			const text = await file.text();
+			state = JSON.parse(text) as Record<string, number>;
+		} catch {
+			// Corrupt state file — start fresh
+		}
+	}
+	state[agentName] = Date.now();
+	await Bun.write(statePath, `${JSON.stringify(state, null, "\t")}\n`);
+}
+
 /** Options for sendMail dep — mirrors the MailClient.send() parameter shape */
 export interface SendMailOptions {
 	from: string;
@@ -83,6 +124,7 @@ export interface CodexBridgeDriverDeps {
  * codex/overlay.ts → bundled-defs.ts) are only loaded when this factory is
  * called — not when the driver module is imported by tests.
  *
+ * @param overstoryDir - Absolute path to .overstory/ directory (e.g. config.project.root + "/.overstory")
  * Call this in sling.ts (and future callers) to wire real implementations.
  */
 export async function makeCodexBridgeDriverDeps(): Promise<CodexBridgeDriverDeps> {
@@ -147,10 +189,16 @@ export async function makeCodexBridgeDriverDeps(): Promise<CodexBridgeDriverDeps
 export class CodexBridgeDriver implements AgentDriver {
 	readonly name = "codex-bridge";
 
-	/** Per-instance debounce state: agentName -> last nudge timestamp (ms) */
-	private readonly nudgeDebounce: Map<string, number> = new Map();
-
-	constructor(private readonly deps: CodexBridgeDriverDeps) {}
+	/**
+	 * @param deps - Injected external dependencies (all I/O)
+	 * @param overstoryDir - Absolute path to .overstory/ directory.
+	 *   Used to locate mail.db and bridge.pid files. Defaults to empty string
+	 *   for backward compatibility in tests that don't exercise nudge/shutdown.
+	 */
+	constructor(
+		private readonly deps: CodexBridgeDriverDeps,
+		private readonly overstoryDir: string = "",
+	) {}
 
 	/**
 	 * Spawn a Codex bridge agent.
@@ -227,23 +275,14 @@ export class CodexBridgeDriver implements AgentDriver {
 		from: string,
 		opts?: NudgeOptions,
 	): Promise<NudgeResult> {
-		// Debounce check: skip if nudged recently, unless force=true
-		if (!opts?.force) {
-			const lastNudge = this.nudgeDebounce.get(agentName);
-			if (lastNudge !== undefined && Date.now() - lastNudge < DEBOUNCE_MS) {
-				return { delivered: false, reason: "debounced" };
-			}
+		// Debounce check: use file-persisted state so debounce works across driver
+		// instantiations (resolveDriverForSession creates a new instance each call).
+		const statePath = join(this.overstoryDir, "nudge-state.json");
+		if (!opts?.force && (await isDebounced(statePath, agentName))) {
+			return { delivered: false, reason: "debounced" };
 		}
 
-		// We need overstoryDir to locate the mail DB and bridge.pid file.
-		// For nudge, we don't have config available directly so we use a best-effort
-		// approach: the caller (nudge.ts) will be refactored in Task 8 to pass
-		// overstoryDir. Until then, we accept a bare agentName and rely on the
-		// injected sendMail/getBridgePid deps to receive the full path.
-		// The mailDbPath is passed as "" here — production use via makeDeps will
-		// wire it correctly when Task 8 refactors nudge.ts.
-		// For now, we call deps directly.
-		const mailDbPath = ""; // Resolved by dep implementation in production
+		const mailDbPath = join(this.overstoryDir, "mail.db");
 
 		// 1. Send mail so the bridge has a message to act on.
 		this.deps.sendMail(mailDbPath, {
@@ -259,8 +298,7 @@ export class CodexBridgeDriver implements AgentDriver {
 		// The bridge writes its actual bun process PID to agents/<name>/bridge.pid
 		// at startup; prefer that over the session PID since the tmux pane's
 		// #{pane_pid} may be a shell wrapper.
-		const overstoryDir = ""; // Resolved by dep implementation in production
-		let bridgePid = await this.deps.getBridgePid(overstoryDir, agentName);
+		let bridgePid = await this.deps.getBridgePid(this.overstoryDir, agentName);
 
 		// 3. Validate the PID is still alive before signalling (C1: stale bridge PID).
 		// kill(pid, 0) checks existence without delivering a signal; throws ESRCH
@@ -283,8 +321,8 @@ export class CodexBridgeDriver implements AgentDriver {
 			}
 		}
 
-		// Record debounce timestamp
-		this.nudgeDebounce.set(agentName, Date.now());
+		// Record debounce timestamp to file so it persists across driver instantiations.
+		await recordNudge(statePath, agentName);
 
 		return { delivered: true };
 	}
@@ -312,10 +350,15 @@ export class CodexBridgeDriver implements AgentDriver {
 	 * Request graceful shutdown by sending SIGTERM to the bridge process.
 	 * Best-effort: if the PID is stale or the bridge is already dead, silently continue.
 	 */
-	async shutdown(_agentName: string): Promise<void> {
-		// Graceful shutdown: bridge will catch SIGTERM and clean up its thread.
-		// Full implementation (resolving overstoryDir + pid file) is deferred to Task 8
-		// when nudge.ts is refactored to pass overstoryDir to the driver.
+	async shutdown(agentName: string): Promise<void> {
+		const bridgePid = await this.deps.getBridgePid(this.overstoryDir, agentName);
+		if (bridgePid !== null) {
+			try {
+				await this.deps.processKill(bridgePid, "SIGTERM");
+			} catch {
+				// Process already gone — not an error
+			}
+		}
 	}
 
 	/** No persistent connections to clean up for the bridge driver. */

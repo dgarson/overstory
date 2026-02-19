@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { OverstoryError } from "../errors";
 import type { AgentRuntime, OverstoryConfig } from "../types";
 import type { AgentDriver } from "./types";
@@ -81,7 +82,7 @@ export async function resolveDriverForSpawn(
  */
 export async function resolveDriverForSession(
 	runtime: AgentRuntime,
-	_config: OverstoryConfig,
+	config: OverstoryConfig,
 ): Promise<AgentDriver> {
 	const driverName = resolveDriverName(runtime);
 	switch (driverName) {
@@ -92,7 +93,8 @@ export async function resolveDriverForSession(
 		case "codex-bridge": {
 			const { CodexBridgeDriver, makeCodexBridgeDriverDeps } = await import("./codex-bridge.ts");
 			const deps = await makeCodexBridgeDriverDeps();
-			return new CodexBridgeDriver(deps);
+			const overstoryDir = join(config.project.root, ".overstory");
+			return new CodexBridgeDriver(deps, overstoryDir);
 		}
 		case "codex-daemon":
 			throw new OverstoryError(

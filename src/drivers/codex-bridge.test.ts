@@ -5,9 +5,15 @@
  * All external dependencies (createSession, startServer, writeAgentsOverlay,
  * writeCodexConfig, sendMail) are injected as fakes so tests remain isolated
  * and fast. See mulch record mx-56558b for background.
+ *
+ * File-persisted debounce tests use real temp directories so we can verify
+ * cross-call debounce state without mocking the filesystem.
  */
 
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { CodexServerState } from "../codex/types";
 import type { AgentRuntime, OverlayConfig } from "../types";
 import type { CodexBridgeDriverDeps } from "./codex-bridge";
@@ -118,7 +124,7 @@ function makeDeps(overrides?: Partial<CodexBridgeDriverDeps>): CodexBridgeDriver
 
 describe("CodexBridgeDriver.name", () => {
 	test("is 'codex-bridge'", () => {
-		const driver = new CodexBridgeDriver(makeDeps());
+		const driver = new CodexBridgeDriver(makeDeps(), "/fake/overstory");
 		expect(driver.name).toBe("codex-bridge");
 	});
 });
@@ -132,13 +138,17 @@ describe("CodexBridgeDriver.spawn", () => {
 					calls.push([worktreePath, config, canonicalRoot]);
 				},
 			}),
+			"/fake/overstory",
 		);
 
 		const ctx = makeSpawnContext();
 		await driver.spawn(ctx);
 
 		expect(calls.length).toBe(1);
-		const [wt, cfg, root] = calls[0]!;
+		const firstCall = calls[0];
+		expect(firstCall).toBeDefined();
+		if (!firstCall) return;
+		const [wt, cfg, root] = firstCall;
 		expect(wt).toBe(ctx.worktreePath);
 		expect(cfg).toBe(ctx.overlayConfig);
 		expect(root).toBe(ctx.config.project.root);
@@ -152,13 +162,17 @@ describe("CodexBridgeDriver.spawn", () => {
 					calls.push([worktreePath, opts]);
 				},
 			}),
+			"/fake/overstory",
 		);
 
 		const ctx = makeSpawnContext();
 		await driver.spawn(ctx);
 
 		expect(calls.length).toBe(1);
-		const [wt, opts] = calls[0]!;
+		const firstCall = calls[0];
+		expect(firstCall).toBeDefined();
+		if (!firstCall) return;
+		const [wt, opts] = firstCall;
 		expect(wt).toBe(ctx.worktreePath);
 		expect(opts.model).toBe("gpt-4o");
 		expect(opts.approvalPolicy).toBe("on-request");
@@ -173,13 +187,17 @@ describe("CodexBridgeDriver.spawn", () => {
 					return fakeServerState;
 				},
 			}),
+			"/fake/overstory",
 		);
 
 		const ctx = makeSpawnContext();
 		await driver.spawn(ctx);
 
 		expect(calls.length).toBe(1);
-		const [dir, port] = calls[0]!;
+		const firstCall = calls[0];
+		expect(firstCall).toBeDefined();
+		if (!firstCall) return;
+		const [dir, port] = firstCall;
 		expect(dir).toEndWith(".overstory");
 		expect(port).toBe(9876);
 	});
@@ -193,13 +211,17 @@ describe("CodexBridgeDriver.spawn", () => {
 					return 9999;
 				},
 			}),
+			"/fake/overstory",
 		);
 
 		const ctx = makeSpawnContext();
 		await driver.spawn(ctx);
 
 		expect(calls.length).toBe(1);
-		const [name, cwd, cmd, env] = calls[0]!;
+		const firstCall = calls[0];
+		expect(firstCall).toBeDefined();
+		if (!firstCall) return;
+		const [name, cwd, cmd, env] = firstCall;
 		expect(name).toBe(ctx.tmuxSessionName);
 		expect(cwd).toBe(ctx.worktreePath);
 		expect(cmd).toContain("bridge.ts");
@@ -214,6 +236,7 @@ describe("CodexBridgeDriver.spawn", () => {
 			makeDeps({
 				createSession: async () => 42,
 			}),
+			"/fake/overstory",
 		);
 
 		const result = await driver.spawn(makeSpawnContext());
@@ -221,7 +244,7 @@ describe("CodexBridgeDriver.spawn", () => {
 	});
 
 	test("throws ConfigError if config.codex is missing", async () => {
-		const driver = new CodexBridgeDriver(makeDeps());
+		const driver = new CodexBridgeDriver(makeDeps(), "/fake/overstory");
 		const ctx = makeSpawnContext();
 		// Remove codex config
 		ctx.config.codex = undefined;
@@ -232,105 +255,242 @@ describe("CodexBridgeDriver.spawn", () => {
 
 describe("CodexBridgeDriver.nudge", () => {
 	test("returns NudgeResult with delivered=true after sending mail", async () => {
-		const driver = new CodexBridgeDriver(makeDeps());
-		const result = await driver.nudge("test-agent", "check mail", "orchestrator");
-		expect(result.delivered).toBe(true);
+		const tmpDir = await mkdtemp(join(tmpdir(), "overstory-test-"));
+		try {
+			const driver = new CodexBridgeDriver(makeDeps(), tmpDir);
+			const result = await driver.nudge("test-agent", "check mail", "orchestrator");
+			expect(result.delivered).toBe(true);
+		} finally {
+			await rm(tmpDir, { recursive: true, force: true });
+		}
 	});
 
 	test("sends mail to the agent", async () => {
-		const mailCalls: Array<{ to: string; body: string }> = [];
-		const driver = new CodexBridgeDriver(
-			makeDeps({
-				sendMail: (_mailDbPath, opts) => {
-					mailCalls.push({ to: opts.to, body: opts.body });
-				},
-			}),
-		);
+		const tmpDir = await mkdtemp(join(tmpdir(), "overstory-test-"));
+		try {
+			const mailCalls: Array<{ to: string; body: string }> = [];
+			const driver = new CodexBridgeDriver(
+				makeDeps({
+					sendMail: (_mailDbPath, opts) => {
+						mailCalls.push({ to: opts.to, body: opts.body });
+					},
+				}),
+				tmpDir,
+			);
 
-		await driver.nudge("test-agent", "wake up", "watchdog");
-		expect(mailCalls.length).toBe(1);
-		expect(mailCalls[0]?.to).toBe("test-agent");
-		expect(mailCalls[0]?.body).toBe("wake up");
+			await driver.nudge("test-agent", "wake up", "watchdog");
+			expect(mailCalls.length).toBe(1);
+			expect(mailCalls[0]?.to).toBe("test-agent");
+			expect(mailCalls[0]?.body).toBe("wake up");
+		} finally {
+			await rm(tmpDir, { recursive: true, force: true });
+		}
+	});
+
+	test("sendMail is called with correct mailDbPath derived from overstoryDir", async () => {
+		const tmpDir = await mkdtemp(join(tmpdir(), "overstory-test-"));
+		try {
+			const mailPaths: string[] = [];
+			const driver = new CodexBridgeDriver(
+				makeDeps({
+					sendMail: (mailDbPath, _opts) => {
+						mailPaths.push(mailDbPath);
+					},
+				}),
+				tmpDir,
+			);
+
+			await driver.nudge("test-agent", "check mail", "orchestrator");
+			expect(mailPaths.length).toBe(1);
+			expect(mailPaths[0]).toBe(join(tmpDir, "mail.db"));
+		} finally {
+			await rm(tmpDir, { recursive: true, force: true });
+		}
+	});
+
+	test("getBridgePid is called with correct overstoryDir", async () => {
+		const tmpDir = await mkdtemp(join(tmpdir(), "overstory-test-"));
+		try {
+			const pidCalls: Array<[string, string]> = [];
+			const driver = new CodexBridgeDriver(
+				makeDeps({
+					getBridgePid: async (overstoryDir, agentName) => {
+						pidCalls.push([overstoryDir, agentName]);
+						return null;
+					},
+				}),
+				tmpDir,
+			);
+
+			await driver.nudge("test-agent", "check mail", "orchestrator");
+			expect(pidCalls.length).toBe(1);
+			const firstCall = pidCalls[0];
+			expect(firstCall).toBeDefined();
+			if (!firstCall) return;
+			expect(firstCall[0]).toBe(tmpDir);
+			expect(firstCall[1]).toBe("test-agent");
+		} finally {
+			await rm(tmpDir, { recursive: true, force: true });
+		}
 	});
 
 	test("sends SIGUSR1 to bridge PID when available", async () => {
-		const signals: Array<[number, string | number]> = [];
-		const driver = new CodexBridgeDriver(
-			makeDeps({
-				getBridgePid: async (_overstoryDir, _agentName) => 5555,
-				processKill: (pid, signal) => {
-					signals.push([pid, signal]);
-				},
-			}),
-		);
+		const tmpDir = await mkdtemp(join(tmpdir(), "overstory-test-"));
+		try {
+			const signals: Array<[number, string | number]> = [];
+			const driver = new CodexBridgeDriver(
+				makeDeps({
+					getBridgePid: async (_overstoryDir, _agentName) => 5555,
+					processKill: (pid, signal) => {
+						signals.push([pid, signal]);
+					},
+				}),
+				tmpDir,
+			);
 
-		await driver.nudge("test-agent", "check mail", "orchestrator");
+			await driver.nudge("test-agent", "check mail", "orchestrator");
 
-		// Should have called kill(5555, 0) to check alive and kill(5555, SIGUSR1)
-		const usr1 = signals.find(([pid, sig]) => pid === 5555 && sig === "SIGUSR1");
-		expect(usr1).toBeDefined();
+			// Should have called kill(5555, 0) to check alive and kill(5555, SIGUSR1)
+			const usr1 = signals.find(([pid, sig]) => pid === 5555 && sig === "SIGUSR1");
+			expect(usr1).toBeDefined();
+		} finally {
+			await rm(tmpDir, { recursive: true, force: true });
+		}
 	});
 
 	test("returns delivered=true even when bridge PID is null (mail-only)", async () => {
-		const driver = new CodexBridgeDriver(
-			makeDeps({
-				getBridgePid: async () => null,
-			}),
-		);
+		const tmpDir = await mkdtemp(join(tmpdir(), "overstory-test-"));
+		try {
+			const driver = new CodexBridgeDriver(
+				makeDeps({
+					getBridgePid: async () => null,
+				}),
+				tmpDir,
+			);
 
-		const result = await driver.nudge("test-agent", "check mail", "orchestrator");
-		expect(result.delivered).toBe(true);
+			const result = await driver.nudge("test-agent", "check mail", "orchestrator");
+			expect(result.delivered).toBe(true);
+		} finally {
+			await rm(tmpDir, { recursive: true, force: true });
+		}
+	});
+
+	test("rapid second nudge without force is debounced", async () => {
+		const tmpDir = await mkdtemp(join(tmpdir(), "overstory-test-"));
+		try {
+			let callCount = 0;
+			const driver = new CodexBridgeDriver(
+				makeDeps({
+					sendMail: (_mailDbPath, _opts) => {
+						callCount++;
+					},
+				}),
+				tmpDir,
+			);
+
+			// First call succeeds
+			const r1 = await driver.nudge("test-agent", "check mail", "orchestrator");
+			expect(r1.delivered).toBe(true);
+
+			// Immediate second call should be debounced (nudge-state.json was written)
+			const r2 = await driver.nudge("test-agent", "check mail again", "orchestrator");
+			expect(r2.delivered).toBe(false);
+			expect(r2.reason).toBe("debounced");
+
+			// Only the first call should have sent mail
+			expect(callCount).toBe(1);
+		} finally {
+			await rm(tmpDir, { recursive: true, force: true });
+		}
 	});
 
 	test("nudge with force=true skips debounce", async () => {
-		let callCount = 0;
-		const driver = new CodexBridgeDriver(
-			makeDeps({
-				sendMail: (_mailDbPath, _opts) => {
-					callCount++;
-				},
-			}),
-		);
+		const tmpDir = await mkdtemp(join(tmpdir(), "overstory-test-"));
+		try {
+			let callCount = 0;
+			const driver = new CodexBridgeDriver(
+				makeDeps({
+					sendMail: (_mailDbPath, _opts) => {
+						callCount++;
+					},
+				}),
+				tmpDir,
+			);
 
-		// First call without force
-		await driver.nudge("test-agent", "check mail", "orchestrator");
-		// Second call immediately (would be debounced) with force=true
-		const result = await driver.nudge("test-agent", "escalation", "watchdog", { force: true });
+			// First call without force
+			await driver.nudge("test-agent", "check mail", "orchestrator");
+			// Second call immediately (would be debounced) with force=true
+			const result = await driver.nudge("test-agent", "escalation", "watchdog", { force: true });
 
-		expect(result.delivered).toBe(true);
-		// Both calls should have gone through (force bypasses debounce)
-		expect(callCount).toBe(2);
+			expect(result.delivered).toBe(true);
+			// Both calls should have gone through (force bypasses debounce)
+			expect(callCount).toBe(2);
+		} finally {
+			await rm(tmpDir, { recursive: true, force: true });
+		}
 	});
 });
 
 describe("CodexBridgeDriver.steer", () => {
 	test("returns false (no active turn for bridge agents)", async () => {
-		const driver = new CodexBridgeDriver(makeDeps());
+		const driver = new CodexBridgeDriver(makeDeps(), "/fake/overstory");
 		const result = await driver.steer("test-agent", "some input");
 		expect(result).toBe(false);
 	});
 });
 
 describe("CodexBridgeDriver.inspect", () => {
-	test("returns AgentInspection with state=unknown", async () => {
-		const driver = new CodexBridgeDriver(makeDeps());
+	test("returns AgentInspection with state=working", async () => {
+		const driver = new CodexBridgeDriver(makeDeps(), "/fake/overstory");
 		const result = await driver.inspect("test-agent");
 		expect(result).toBeDefined();
-		expect(typeof result.state).toBe("string");
+		expect(result.state).toBe("working");
 		expect(typeof result.lastActivity).toBe("string");
 	});
 });
 
 describe("CodexBridgeDriver.shutdown", () => {
-	test("resolves without throwing", async () => {
-		const driver = new CodexBridgeDriver(makeDeps());
+	test("resolves without throwing when no bridge PID", async () => {
+		const driver = new CodexBridgeDriver(makeDeps(), "/fake/overstory");
+		await expect(driver.shutdown("test-agent")).resolves.toBeUndefined();
+	});
+
+	test("sends SIGTERM to bridge PID when available", async () => {
+		const signals: Array<[number, string | number]> = [];
+		const driver = new CodexBridgeDriver(
+			makeDeps({
+				getBridgePid: async () => 7777,
+				processKill: (pid, signal) => {
+					signals.push([pid, signal]);
+				},
+			}),
+			"/fake/overstory",
+		);
+
+		await driver.shutdown("test-agent");
+
+		const sigterm = signals.find(([pid, sig]) => pid === 7777 && sig === "SIGTERM");
+		expect(sigterm).toBeDefined();
+	});
+
+	test("does not throw when processKill throws (stale PID)", async () => {
+		const driver = new CodexBridgeDriver(
+			makeDeps({
+				getBridgePid: async () => 8888,
+				processKill: (_pid, _signal) => {
+					throw new Error("ESRCH: no such process");
+				},
+			}),
+			"/fake/overstory",
+		);
+
 		await expect(driver.shutdown("test-agent")).resolves.toBeUndefined();
 	});
 });
 
 describe("CodexBridgeDriver.close", () => {
 	test("resolves without throwing", async () => {
-		const driver = new CodexBridgeDriver(makeDeps());
+		const driver = new CodexBridgeDriver(makeDeps(), "/fake/overstory");
 		await expect(driver.close()).resolves.toBeUndefined();
 	});
 });
