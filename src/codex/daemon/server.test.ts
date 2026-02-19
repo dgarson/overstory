@@ -16,7 +16,20 @@ function mockPool(): AgentPool & { addCalls: number; drainCalled: boolean } {
 
 		async add(_config: BridgeConfig): Promise<void> {
 			mock.addCalls++;
-			// Store minimal ManagedAgent for read-only tests
+			// Store minimal ManagedAgent so get() and GET /agents/:name work
+			agents.set(_config.agentName, {
+				config: _config,
+				rpc: {
+					request: async () => ({}),
+					onNotification: () => {},
+					onRequest: () => {},
+					closed: false,
+					close: () => {},
+				},
+				threadId: "test-thread-id",
+				activeTurnId: null,
+				state: "booting",
+			} as ManagedAgent);
 		},
 		get(name: string): ManagedAgent | undefined {
 			return agents.get(name);
@@ -220,5 +233,20 @@ describe("DaemonServer", () => {
 		server = createDaemonServer({ port: 0, pool: mockPool(), token: TOKEN });
 		const res = await fetch(`${server.url}agents/some-agent`);
 		expect(res.status).toBe(404);
+	});
+
+	test("GET /agents/:name returns 200 for known agent", async () => {
+		const pool = mockPool();
+		server = createDaemonServer({ port: 0, pool, token: TOKEN });
+		// First add an agent via POST so it's stored in the pool
+		await fetch(`${server.url}agents`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
+			body: JSON.stringify(makeBridgeConfig({ agentName: "known-agent" })),
+		});
+		const res = await fetch(`${server.url}agents/known-agent`);
+		expect(res.status).toBe(200);
+		const body: unknown = await res.json();
+		expect(body).toMatchObject({ state: "booting" });
 	});
 });
