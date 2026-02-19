@@ -66,6 +66,39 @@ export function isProcessRunning(pid: number): boolean {
 }
 
 /**
+ * Evaluate health for a codex-daemon agent.
+ *
+ * Daemon-managed agents do not use tmux, so ZFC tmux liveness checks do not
+ * apply. Until the daemon HTTP health endpoint is wired (Task 14), this
+ * returns a simple "working" placeholder that prevents daemon agents from
+ * being incorrectly marked as zombies.
+ *
+ * TODO(Task 14): Replace with real daemon HTTP health check at GET /agents/:name
+ *
+ * @param session - The codex-daemon agent session to evaluate
+ * @param thresholds - Staleness and zombie thresholds (unused for now, reserved for Task 14)
+ * @returns A HealthCheck in "working" state with action "none"
+ */
+export function evaluateDaemonHealth(
+	session: AgentSession,
+	_thresholds: { staleMs: number; zombieMs: number },
+): HealthCheck {
+	const now = new Date();
+	return {
+		agentName: session.agentName,
+		timestamp: now.toISOString(),
+		// Daemon agents don't use tmux — liveness is opaque until Task 14 wires HTTP checks.
+		processAlive: true,
+		tmuxAlive: false,
+		pidAlive: null,
+		lastActivity: session.lastActivity,
+		state: "working",
+		action: "none",
+		reconciliationNote: "codex-daemon: tmux health skipped — daemon health is opaque pending Task 14",
+	};
+}
+
+/**
  * Evaluate the health of an agent session.
  *
  * Implements the ZFC principle: observable state (tmux liveness, pid liveness)
@@ -73,6 +106,8 @@ export function isProcessRunning(pid: number): boolean {
  *
  * Decision logic (in priority order):
  *
+ * 0. codex-daemon sessions skip tmux checks entirely — they are managed by the
+ *    sidecar daemon, not tmux. Returns evaluateDaemonHealth() placeholder.
  * 1. Completed agents skip monitoring entirely.
  * 2. tmux dead → zombie, terminate (regardless of what sessions.json says).
  * 3. tmux alive + sessions.json says zombie → investigate (don't auto-kill).
@@ -94,6 +129,12 @@ export function evaluateHealth(
 	tmuxAlive: boolean,
 	thresholds: { staleMs: number; zombieMs: number },
 ): HealthCheck {
+	// Skip tmux check for daemon-managed agents — they don't use tmux.
+	// The real HTTP health check is deferred to Task 14 (CodexDaemonDriver wiring).
+	if (session.runtime === "codex-daemon") {
+		return evaluateDaemonHealth(session, thresholds);
+	}
+
 	const now = new Date();
 	const lastActivityTime = new Date(session.lastActivity).getTime();
 	const elapsedMs = now.getTime() - lastActivityTime;
@@ -233,7 +274,7 @@ export function evaluateHealth(
  * Compute the next agent state based on a health check.
  *
  * State transitions are strictly forward-only using the ordering:
- *   booting(0) → working(1) → stalled(2) → zombie(3)
+ *   booting(0) → working(1) → completed(2) → stalled(3) → zombie(4)
  *
  * A state can only advance forward, never move backwards.
  * For example, a zombie can never become working again.

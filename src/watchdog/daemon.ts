@@ -6,7 +6,7 @@
  * immediately escalating to AI triage:
  *
  *   Level 0 (warn):      Log warning via onHealthCheck callback, no direct action
- *   Level 1 (nudge):     Send tmux nudge via nudgeAgent()
+ *   Level 1 (nudge):     Send driver-based nudge via resolveDriverForSession()
  *   Level 2 (escalate):  Invoke Tier 1 AI triage (if tier1Enabled), else skip
  *   Level 3 (terminate): Kill tmux session
  *
@@ -21,11 +21,11 @@
  */
 
 import { join } from "node:path";
-import { nudgeAgent } from "../commands/nudge.ts";
+import { loadConfig } from "../config.ts";
 import { createEventStore } from "../events/store.ts";
 import { createMulchClient } from "../mulch/client.ts";
 import { openSessionStore } from "../sessions/compat.ts";
-import type { AgentSession, EventStore, HealthCheck } from "../types.ts";
+import type { AgentSession, EventStore, HealthCheck, OverstoryConfig } from "../types.ts";
 import { isSessionAlive, killSession } from "../worktree/tmux.ts";
 import { evaluateHealth, transitionState } from "./health.ts";
 import { triageAgent } from "./triage.ts";
@@ -141,16 +141,15 @@ async function checkRunCompletion(ctx: {
 	store: { getByRun: (runId: string) => AgentSession[] };
 	runId: string;
 	overstoryDir: string;
-	root: string;
 	nudge: (
-		projectRoot: string,
 		agentName: string,
 		message: string,
-		force: boolean,
+		from: string,
+		opts?: { force?: boolean },
 	) => Promise<{ delivered: boolean; reason?: string }>;
 	eventStore: EventStore | null;
 }): Promise<void> {
-	const { store, runId, overstoryDir, root, nudge, eventStore } = ctx;
+	const { store, runId, overstoryDir, nudge, eventStore } = ctx;
 
 	const runSessions = store.getByRun(runId);
 	const workerSessions = runSessions.filter((s) => !PERSISTENT_CAPABILITIES.has(s.capability));
@@ -181,10 +180,10 @@ async function checkRunCompletion(ctx: {
 	// Nudge the coordinator
 	try {
 		await nudge(
-			root,
 			"coordinator",
 			`[WATCHDOG] All ${workerSessions.length} worker(s) in run ${runId} have completed. Ready for merge/cleanup.`,
-			true,
+			"watchdog",
+			{ force: true },
 		);
 	} catch {
 		// Nudge delivery failure is non-fatal
@@ -219,6 +218,12 @@ export interface DaemonOptions {
 	nudgeIntervalMs?: number;
 	tier1Enabled?: boolean;
 	onHealthCheck?: (check: HealthCheck) => void;
+	/**
+	 * Pre-loaded config. When omitted, the daemon loads it from disk on each tick.
+	 * Callers that already have config (e.g. watch.ts) should pass it here to avoid
+	 * redundant file reads.
+	 */
+	config?: OverstoryConfig;
 	/** Dependency injection for testing. Uses real implementations when omitted. */
 	_tmux?: {
 		isSessionAlive: (name: string) => Promise<boolean>;
@@ -230,12 +235,16 @@ export interface DaemonOptions {
 		root: string;
 		lastActivity: string;
 	}) => Promise<"retry" | "terminate" | "extend">;
-	/** Dependency injection for testing. Uses real nudgeAgent when omitted. */
+	/**
+	 * Dependency injection for testing. When omitted, uses driver-based nudge
+	 * resolved from the agent session's runtime via resolveDriverForSession().
+	 * Signature matches AgentDriver.nudge() for a consistent interface.
+	 */
 	_nudge?: (
-		projectRoot: string,
 		agentName: string,
 		message: string,
-		force: boolean,
+		from: string,
+		opts?: { force?: boolean },
 	) => Promise<{ delivered: boolean; reason?: string }>;
 	/** Dependency injection for testing. Overrides EventStore creation. */
 	_eventStore?: EventStore | null;
@@ -308,11 +317,49 @@ export async function runDaemonTick(options: DaemonOptions): Promise<void> {
 	} = options;
 	const tmux = options._tmux ?? { isSessionAlive, killSession };
 	const triage = options._triage ?? triageAgent;
-	const nudge = options._nudge ?? nudgeAgent;
 	const recordFailureFn = options._recordFailure ?? recordFailure;
 
 	const overstoryDir = join(root, ".overstory");
+
+	// Resolve config: use injected value, fall back to loading from disk.
+	// Config is needed for driver resolution (resolveDriverForSession).
+	let config: OverstoryConfig | null = options.config ?? null;
+	if (!config && !options._nudge) {
+		// Only load config from disk when no DI nudge is provided — avoids file I/O in tests.
+		try {
+			config = await loadConfig(root);
+		} catch {
+			// Config load failure is non-fatal — drivers fall back to "claude" runtime.
+		}
+	}
+
 	const { store } = openSessionStore(overstoryDir);
+
+	// Build the nudge function: either the DI override (tests) or driver-based resolution.
+	// The driver is resolved per-session at call time using session.runtime.
+	const nudge =
+		options._nudge ??
+		(async (
+			agentName: string,
+			message: string,
+			from: string,
+			opts?: { force?: boolean },
+		): Promise<{ delivered: boolean; reason?: string }> => {
+			// config may be null if loading failed; fall back to "claude" driver.
+			if (!config) {
+				return { delivered: false, reason: "config unavailable" };
+			}
+			const { resolveDriverForSession } = await import("../drivers/resolve.ts");
+			// Look up session to get its runtime; fall back to "claude" if not found.
+			const session = store.getByName(agentName);
+			const runtime = session?.runtime ?? "claude";
+			try {
+				const driver = await resolveDriverForSession(runtime, config);
+				return driver.nudge(agentName, message, from, { force: opts?.force });
+			} catch {
+				return { delivered: false, reason: "driver resolution failed" };
+			}
+		});
 
 	// Open EventStore for recording daemon events (fire-and-forget)
 	let eventStore: EventStore | null = null;
@@ -448,7 +495,6 @@ export async function runDaemonTick(options: DaemonOptions): Promise<void> {
 				store,
 				runId,
 				overstoryDir,
-				root,
 				nudge,
 				eventStore,
 			});
@@ -491,10 +537,10 @@ async function executeEscalationAction(ctx: {
 		lastActivity: string;
 	}) => Promise<"retry" | "terminate" | "extend">;
 	nudge: (
-		projectRoot: string,
 		agentName: string,
 		message: string,
-		force: boolean,
+		from: string,
+		opts?: { force?: boolean },
 	) => Promise<{ delivered: boolean; reason?: string }>;
 	eventStore: EventStore | null;
 	runId: string | null;
@@ -533,14 +579,14 @@ async function executeEscalationAction(ctx: {
 		}
 
 		case 1: {
-			// Level 1: nudge — send a tmux nudge to the agent
+			// Level 1: nudge — send a driver-based nudge to the agent
 			let delivered = false;
 			try {
 				const result = await nudge(
-					root,
 					session.agentName,
 					`[WATCHDOG] Agent "${session.agentName}" appears stalled. Please check your current task and report status.`,
-					true, // force — skip debounce for watchdog nudges
+					"watchdog",
+					{ force: true }, // skip debounce for watchdog nudges
 				);
 				delivered = result.delivered;
 			} catch {
@@ -595,11 +641,11 @@ async function executeEscalationAction(ctx: {
 				// Send a nudge with a recovery message
 				try {
 					await nudge(
-						root,
 						session.agentName,
 						"[WATCHDOG] Triage suggests recovery is possible. " +
 							"Please retry your current operation or check for errors.",
-						true, // force — skip debounce
+						"watchdog",
+						{ force: true }, // skip debounce
 					);
 				} catch {
 					// Nudge delivery failure is non-fatal
