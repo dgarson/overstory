@@ -117,13 +117,13 @@ describe("checkAgents", () => {
 		expect(parseCheck?.status).toBe("pass");
 	});
 
-	test("fails when agent has invalid model", async () => {
+	test("fails when agent has empty model string", async () => {
 		const manifest = {
 			version: "1.0",
 			agents: {
 				scout: {
 					file: "scout.md",
-					model: "invalid-model",
+					model: "",
 					tools: ["Read"],
 					capabilities: ["explore"],
 					canSpawn: false,

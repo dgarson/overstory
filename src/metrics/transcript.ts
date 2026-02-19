@@ -35,38 +35,154 @@ interface ModelPricing {
 	cacheCreationPerMTok: number;
 }
 
-/** Hardcoded pricing for known Claude models. */
+/**
+ * Hardcoded pricing (USD per million tokens) for known models across providers.
+ *
+ * Matched by substring against the lowercase model name. Object.entries preserves
+ * insertion order, so more-specific keys MUST come before any key that is a
+ * substring of them (e.g. "o1-mini" before "o1", "gpt-5-mini" before "gpt-5").
+ *
+ * cacheCreationPerMTok is 0 for non-Anthropic providers — those APIs handle
+ * cache storage server-side with no separate write charge.
+ *
+ * Sources (Feb 2026):
+ *   Anthropic — https://anthropic.com/pricing
+ *   OpenAI    — https://openai.com/api/pricing/
+ *   Z.AI      — https://docs.z.ai/guides/overview/pricing
+ *   MiniMax   — https://platform.minimax.io/docs/guides/pricing
+ */
 const MODEL_PRICING: Record<string, ModelPricing> = {
-	opus: {
-		inputPerMTok: 15,
-		outputPerMTok: 75,
-		cacheReadPerMTok: 1.5, // 10% of input
-		cacheCreationPerMTok: 3.75, // 25% of input
+	// ── Anthropic Claude ──────────────────────────────────────────────────────
+	opus: { inputPerMTok: 15, outputPerMTok: 75, cacheReadPerMTok: 1.5, cacheCreationPerMTok: 3.75 },
+	sonnet: { inputPerMTok: 3, outputPerMTok: 15, cacheReadPerMTok: 0.3, cacheCreationPerMTok: 0.75 },
+	haiku: { inputPerMTok: 0.8, outputPerMTok: 4, cacheReadPerMTok: 0.08, cacheCreationPerMTok: 0.2 },
+
+	// ── OpenAI — O-series reasoning (specific variants before base) ───────────
+	"o1-mini": {
+		inputPerMTok: 1.1,
+		outputPerMTok: 4.4,
+		cacheReadPerMTok: 0.55,
+		cacheCreationPerMTok: 0,
 	},
-	sonnet: {
-		inputPerMTok: 3,
-		outputPerMTok: 15,
-		cacheReadPerMTok: 0.3, // 10% of input
-		cacheCreationPerMTok: 0.75, // 25% of input
+	o1: { inputPerMTok: 15, outputPerMTok: 60, cacheReadPerMTok: 7.5, cacheCreationPerMTok: 0 },
+	"o3-mini": {
+		inputPerMTok: 1.1,
+		outputPerMTok: 4.4,
+		cacheReadPerMTok: 0.55,
+		cacheCreationPerMTok: 0,
 	},
-	haiku: {
-		inputPerMTok: 0.8,
-		outputPerMTok: 4,
-		cacheReadPerMTok: 0.08, // 10% of input
-		cacheCreationPerMTok: 0.2, // 25% of input
+	o3: { inputPerMTok: 2, outputPerMTok: 8, cacheReadPerMTok: 1, cacheCreationPerMTok: 0 },
+	"o4-mini": {
+		inputPerMTok: 1.1,
+		outputPerMTok: 4.4,
+		cacheReadPerMTok: 0.55,
+		cacheCreationPerMTok: 0,
+	},
+
+	// ── OpenAI — Codex app-server models (most-specific first) ───────────────
+	// Substring containment chain: spark ⊃ gpt-5.3-codex ⊃ gpt-5.3 ⊃ codex ⊃ gpt-5
+	"gpt-5.3-codex-spark": {
+		inputPerMTok: 1.25,
+		outputPerMTok: 10,
+		cacheReadPerMTok: 0.13,
+		cacheCreationPerMTok: 0,
+	},
+	"gpt-5.3-codex": {
+		inputPerMTok: 1.25,
+		outputPerMTok: 10,
+		cacheReadPerMTok: 0.13,
+		cacheCreationPerMTok: 0,
+	},
+	"gpt-5.3": {
+		inputPerMTok: 1.25,
+		outputPerMTok: 10,
+		cacheReadPerMTok: 0.13,
+		cacheCreationPerMTok: 0,
+	},
+	codex: { inputPerMTok: 1.25, outputPerMTok: 10, cacheReadPerMTok: 0.13, cacheCreationPerMTok: 0 },
+
+	// ── OpenAI — GPT-5 family (specific variants before "gpt-5") ─────────────
+	"gpt-5.2": {
+		inputPerMTok: 1.75,
+		outputPerMTok: 14,
+		cacheReadPerMTok: 0.18,
+		cacheCreationPerMTok: 0,
+	},
+	"gpt-5-mini": {
+		inputPerMTok: 0.25,
+		outputPerMTok: 2,
+		cacheReadPerMTok: 0.03,
+		cacheCreationPerMTok: 0,
+	},
+	"gpt-5-nano": {
+		inputPerMTok: 0.05,
+		outputPerMTok: 0.4,
+		cacheReadPerMTok: 0.01,
+		cacheCreationPerMTok: 0,
+	},
+	"gpt-5": {
+		inputPerMTok: 1.25,
+		outputPerMTok: 10,
+		cacheReadPerMTok: 0.13,
+		cacheCreationPerMTok: 0,
+	},
+
+	// ── OpenAI — GPT-4 family (mini/nano before base, 4o-mini before 4o) ──────
+	"gpt-4.1-mini": {
+		inputPerMTok: 0.4,
+		outputPerMTok: 1.6,
+		cacheReadPerMTok: 0.1,
+		cacheCreationPerMTok: 0,
+	},
+	"gpt-4.1-nano": {
+		inputPerMTok: 0.1,
+		outputPerMTok: 0.4,
+		cacheReadPerMTok: 0.03,
+		cacheCreationPerMTok: 0,
+	},
+	"gpt-4.1": { inputPerMTok: 2, outputPerMTok: 8, cacheReadPerMTok: 0.5, cacheCreationPerMTok: 0 },
+	"4o-mini": {
+		inputPerMTok: 0.15,
+		outputPerMTok: 0.6,
+		cacheReadPerMTok: 0.08,
+		cacheCreationPerMTok: 0,
+	},
+	"4o": { inputPerMTok: 2.5, outputPerMTok: 10, cacheReadPerMTok: 1.25, cacheCreationPerMTok: 0 },
+
+	// ── Z.AI (Zhipu GLM) — "glm-5-code" before "glm-5" ──────────────────────
+	"glm-5-code": {
+		inputPerMTok: 1.2,
+		outputPerMTok: 5,
+		cacheReadPerMTok: 0.3,
+		cacheCreationPerMTok: 0,
+	},
+	"glm-5": { inputPerMTok: 1, outputPerMTok: 3.2, cacheReadPerMTok: 0.2, cacheCreationPerMTok: 0 },
+	"glm-4.7": {
+		inputPerMTok: 0.6,
+		outputPerMTok: 2.2,
+		cacheReadPerMTok: 0.11,
+		cacheCreationPerMTok: 0,
+	},
+
+	// ── MiniMax M2.5 ──────────────────────────────────────────────────────────
+	minimax: {
+		inputPerMTok: 0.3,
+		outputPerMTok: 1.1,
+		cacheReadPerMTok: 0.15,
+		cacheCreationPerMTok: 0,
 	},
 };
 
 /**
- * Determine the pricing tier for a given model string.
- * Matches on substring: "opus" -> opus pricing, "sonnet" -> sonnet, "haiku" -> haiku.
- * Returns null if unrecognized.
+ * Determine the pricing for a given model string.
+ * Iterates MODEL_PRICING in insertion order, returning the first entry whose key
+ * is a substring of the lowercase model name. Returns null if unrecognized.
  */
 function getPricingForModel(model: string): ModelPricing | null {
 	const lower = model.toLowerCase();
-	if (lower.includes("opus")) return MODEL_PRICING.opus ?? null;
-	if (lower.includes("sonnet")) return MODEL_PRICING.sonnet ?? null;
-	if (lower.includes("haiku")) return MODEL_PRICING.haiku ?? null;
+	for (const [key, pricing] of Object.entries(MODEL_PRICING)) {
+		if (lower.includes(key)) return pricing;
+	}
 	return null;
 }
 

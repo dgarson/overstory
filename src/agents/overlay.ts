@@ -1,16 +1,8 @@
 import { mkdir } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { AgentError } from "../errors.ts";
 import type { OverlayConfig } from "../types.ts";
-
-/**
- * Resolve the path to the overlay template file.
- * The template lives at `templates/overlay.md.tmpl` relative to the repo root.
- */
-function getTemplatePath(): string {
-	// src/agents/overlay.ts -> repo root is ../../
-	return join(dirname(import.meta.dir), "..", "templates", "overlay.md.tmpl");
-}
+import { BUNDLED_TEMPLATES } from "./bundled-defs.ts";
 
 /**
  * Format the file scope list as a markdown bullet list.
@@ -152,23 +144,10 @@ export function formatCanSpawn(config: OverlayConfig): string {
  * @throws {AgentError} If the template file cannot be found or read
  */
 export async function generateOverlay(config: OverlayConfig): Promise<string> {
-	const templatePath = getTemplatePath();
-	const file = Bun.file(templatePath);
-	const exists = await file.exists();
-
-	if (!exists) {
-		throw new AgentError(`Overlay template not found: ${templatePath}`, {
+	const template = BUNDLED_TEMPLATES["overlay.md.tmpl"];
+	if (!template) {
+		throw new AgentError("Overlay template missing from binary (rebuild with make bundled-defs)", {
 			agentName: config.agentName,
-		});
-	}
-
-	let template: string;
-	try {
-		template = await file.text();
-	} catch (err) {
-		throw new AgentError(`Failed to read overlay template: ${templatePath}`, {
-			agentName: config.agentName,
-			cause: err instanceof Error ? err : undefined,
 		});
 	}
 

@@ -37,7 +37,7 @@ export interface OverstoryConfig {
 		zombieThresholdMs: number; // When to kill
 		nudgeIntervalMs: number; // Time between progressive nudge stages (default 60_000)
 	};
-	models: Partial<Record<string, "sonnet" | "opus" | "haiku">>;
+	models: Partial<Record<string, string>>;
 	logging: {
 		verbose: boolean;
 		redactSecrets: boolean;
@@ -72,7 +72,7 @@ export interface AgentManifest {
 
 export interface AgentDefinition {
 	file: string; // Path to base agent definition (.md)
-	model: "sonnet" | "opus" | "haiku";
+	model: string;
 	tools: string[]; // Allowed tools
 	capabilities: string[]; // What this agent can do
 	canSpawn: boolean; // Can this agent spawn sub-workers?

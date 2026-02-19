@@ -348,10 +348,21 @@ models:
 		expect(config.models.builder).toBe("opus");
 	});
 
-	test("rejects invalid model name in models section", async () => {
+	test("accepts arbitrary model strings (validated at runtime by Claude Code)", async () => {
 		await writeConfig(`
 models:
-  coordinator: gpt4
+  coordinator: gpt-4o
+  builder: claude-3-7-sonnet-20250219
+`);
+		const config = await loadConfig(tempDir);
+		expect(config.models.coordinator).toBe("gpt-4o");
+		expect(config.models.builder).toBe("claude-3-7-sonnet-20250219");
+	});
+
+	test("rejects empty string model name in models section", async () => {
+		await writeConfig(`
+models:
+  coordinator: ""
 `);
 		await expect(loadConfig(tempDir)).rejects.toThrow(ValidationError);
 	});

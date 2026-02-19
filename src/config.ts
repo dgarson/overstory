@@ -426,11 +426,10 @@ function validateConfig(config: OverstoryConfig): void {
 		});
 	}
 
-	// models: each value must be a valid model name
-	const validModels = ["sonnet", "opus", "haiku"];
+	// models: each value must be a non-empty string (model IDs are runtime-validated by Claude Code)
 	for (const [role, model] of Object.entries(config.models)) {
-		if (model !== undefined && !validModels.includes(model)) {
-			throw new ValidationError(`models.${role} must be one of: ${validModels.join(", ")}`, {
+		if (model !== undefined && (typeof model !== "string" || model.length === 0)) {
+			throw new ValidationError(`models.${role} must be a non-empty string`, {
 				field: `models.${role}`,
 				value: model,
 			});

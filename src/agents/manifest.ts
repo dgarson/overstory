@@ -26,8 +26,6 @@ interface RawManifest {
 	capabilityIndex?: unknown;
 }
 
-const VALID_MODELS = new Set(["sonnet", "opus", "haiku"]);
-
 /**
  * Validate that a raw parsed object conforms to the AgentDefinition shape.
  * Returns a list of error messages for any violations.
@@ -46,8 +44,8 @@ function validateAgentDefinition(name: string, raw: unknown): string[] {
 		errors.push(`Agent "${name}": "file" must be a non-empty string`);
 	}
 
-	if (typeof def.model !== "string" || !VALID_MODELS.has(def.model)) {
-		errors.push(`Agent "${name}": "model" must be one of: sonnet, opus, haiku`);
+	if (typeof def.model !== "string" || def.model.length === 0) {
+		errors.push(`Agent "${name}": "model" must be a non-empty string`);
 	}
 
 	if (!Array.isArray(def.tools)) {
@@ -273,8 +271,6 @@ export function createManifestLoader(manifestPath: string, agentBaseDir: string)
 	};
 }
 
-type ModelName = "sonnet" | "opus" | "haiku";
-
 /**
  * Resolve the model for an agent role.
  *
@@ -284,8 +280,8 @@ export function resolveModel(
 	config: OverstoryConfig,
 	manifest: AgentManifest,
 	role: string,
-	fallback: ModelName,
-): ModelName {
+	fallback: string,
+): string {
 	const configModel = config.models[role];
 	if (configModel) return configModel;
 	const manifestModel = manifest.agents[role]?.model;

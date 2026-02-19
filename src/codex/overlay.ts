@@ -1,4 +1,5 @@
 import { join, resolve } from "node:path";
+import { BUNDLED_TEMPLATES } from "../agents/bundled-defs.ts";
 import {
 	formatCanSpawn,
 	formatConstraints,
@@ -9,41 +10,23 @@ import {
 } from "../agents/overlay";
 import type { OverlayConfig } from "../types";
 
-function getTemplatePath(): string {
-	// src/codex/overlay.ts -> repo root is ../../
-	return resolve(join(import.meta.dir, "../../templates/overlay.md.tmpl"));
-}
-
 /**
- * Generate a per-worker AGENTS.md overlay from the Codex-specific template.
+ * Generate a per-worker AGENTS.md overlay using the shared overlay template.
  *
- * Reads `templates/agents-overlay.md.tmpl` and replaces all `{{VARIABLE}}`
- * placeholders with values derived from the provided config.
- *
- * Unlike the Claude overlay (writeOverlay in src/agents/overlay.ts), this
- * variant targets AGENTS.md at the worktree root — the standard location
- * for Codex agent instructions — and does not reference Claude Code-specific
- * flags or paths such as `.claude/CLAUDE.md` or `--dangerously-skip-permissions`.
+ * Uses `overlay.md.tmpl` (the same template as the Claude overlay) and
+ * replaces all `{{VARIABLE}}` placeholders with values derived from the
+ * provided config. The rendered content is written to AGENTS.md at the
+ * worktree root — the standard location for Codex agent instructions —
+ * rather than `.claude/CLAUDE.md`.
  *
  * @param config - The overlay configuration for this agent/task
  * @returns The rendered overlay content as a string
  * @throws {Error} If the template file cannot be found or read
  */
 export async function generateAgentsOverlay(config: OverlayConfig): Promise<string> {
-	const templatePath = getTemplatePath();
-	const file = Bun.file(templatePath);
-
-	if (!(await file.exists())) {
-		throw new Error(`AGENTS.md template not found at ${templatePath}`);
-	}
-
-	let content: string;
-	try {
-		content = await file.text();
-	} catch (err) {
-		throw new Error(
-			`Failed to read AGENTS.md template: ${templatePath}: ${err instanceof Error ? err.message : String(err)}`,
-		);
+	const content = BUNDLED_TEMPLATES["overlay.md.tmpl"];
+	if (!content) {
+		throw new Error("AGENTS.md template missing from binary (rebuild with make bundled-defs)");
 	}
 
 	const specInstruction = config.specPath

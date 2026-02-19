@@ -466,7 +466,7 @@ describe("deployHooks", () => {
 		expect(guardMatchers).toContain("NotebookEdit");
 	});
 
-	test("lead capability gets Write/Edit/NotebookEdit guards and Bash file guards", async () => {
+	test("lead capability gets path boundary and danger guards but no file-modification blocks", async () => {
 		const worktreePath = join(tempDir, "lead-wt");
 
 		await deployHooks(worktreePath, "lead-agent", "lead");
@@ -476,6 +476,7 @@ describe("deployHooks", () => {
 		const parsed = JSON.parse(content);
 		const preToolUse = parsed.hooks.PreToolUse;
 
+		// Path boundary guards still apply to Write/Edit/NotebookEdit
 		const guardMatchers = preToolUse
 			.filter((h: { matcher: string }) => h.matcher !== "")
 			.map((h: { matcher: string }) => h.matcher);
@@ -485,9 +486,9 @@ describe("deployHooks", () => {
 		expect(guardMatchers).toContain("NotebookEdit");
 		expect(guardMatchers).toContain("Bash");
 
-		// Should have 3 Bash guards: danger guard + file guard + universal push guard
+		// Should have 2 Bash guards: danger guard + universal push guard (no file guard for lead)
 		const bashGuards = preToolUse.filter((h: { matcher: string }) => h.matcher === "Bash");
-		expect(bashGuards.length).toBe(3);
+		expect(bashGuards.length).toBe(2);
 	});
 
 	test("builder capability gets path boundary + Bash danger + Bash path boundary guards + native team tool blocks", async () => {
@@ -605,9 +606,9 @@ describe("getCapabilityGuards", () => {
 		expect(guards.length).toBe(NATIVE_TEAM_TOOL_COUNT + 4);
 	});
 
-	test("returns 14 guards for lead (10 team + 3 tool blocks + 1 bash file guard)", () => {
+	test("returns 10 guards for lead (10 team tool blocks only — lead can implement)", () => {
 		const guards = getCapabilityGuards("lead");
-		expect(guards.length).toBe(NATIVE_TEAM_TOOL_COUNT + 4);
+		expect(guards.length).toBe(NATIVE_TEAM_TOOL_COUNT);
 	});
 
 	test("returns 11 guards for builder (10 team + 1 bash path boundary)", () => {
@@ -650,13 +651,28 @@ describe("getCapabilityGuards", () => {
 		expect(matchers).toContain("Bash");
 	});
 
-	test("lead guards include Write, Edit, NotebookEdit, and Bash matchers", () => {
+	test("lead guards only include native team tool matchers (no Write/Edit/Bash file blocks)", () => {
 		const guards = getCapabilityGuards("lead");
 		const matchers = guards.map((g) => g.matcher);
-		expect(matchers).toContain("Write");
-		expect(matchers).toContain("Edit");
-		expect(matchers).toContain("NotebookEdit");
-		expect(matchers).toContain("Bash");
+		expect(matchers).not.toContain("Write");
+		expect(matchers).not.toContain("Edit");
+		expect(matchers).not.toContain("NotebookEdit");
+		expect(matchers).not.toContain("Bash");
+		// All guards are native team tool blocks
+		for (const matcher of matchers) {
+			expect([
+				"Task",
+				"TeamCreate",
+				"TeamDelete",
+				"SendMessage",
+				"TaskCreate",
+				"TaskUpdate",
+				"TaskList",
+				"TaskGet",
+				"TaskOutput",
+				"TaskStop",
+			]).toContain(matcher);
+		}
 	});
 
 	test("tool block guards include capability name in reason", () => {
@@ -667,12 +683,10 @@ describe("getCapabilityGuards", () => {
 		expect(writeGuard?.hooks[0]?.command).toContain("cannot modify files");
 	});
 
-	test("lead tool block guards include lead in reason", () => {
+	test("lead does not get Edit tool block (lead can implement)", () => {
 		const guards = getCapabilityGuards("lead");
 		const editGuard = guards.find((g) => g.matcher === "Edit");
-		expect(editGuard).toBeDefined();
-		expect(editGuard?.hooks[0]?.command).toContain("lead");
-		expect(editGuard?.hooks[0]?.command).toContain("cannot modify files");
+		expect(editGuard).toBeUndefined();
 	});
 
 	test("bash file guard for scout includes capability in block message", () => {
@@ -682,11 +696,10 @@ describe("getCapabilityGuards", () => {
 		expect(bashGuard?.hooks[0]?.command).toContain("scout agents cannot modify files");
 	});
 
-	test("bash file guard for lead includes capability in block message", () => {
+	test("lead does not get Bash file guard (lead can implement)", () => {
 		const guards = getCapabilityGuards("lead");
 		const bashGuard = guards.find((g) => g.matcher === "Bash");
-		expect(bashGuard).toBeDefined();
-		expect(bashGuard?.hooks[0]?.command).toContain("lead agents cannot modify files");
+		expect(bashGuard).toBeUndefined();
 	});
 
 	test("all capabilities get Task tool blocked", () => {
@@ -981,8 +994,10 @@ describe("buildBashFileGuardScript", () => {
 
 	test("dangerous pattern check outputs block decision JSON", () => {
 		const script = buildBashFileGuardScript("reviewer");
-		expect(script).toContain('"decision":"block"');
+		expect(script).toContain("decision");
+		expect(script).toContain("block");
 		expect(script).toContain("reviewer agents cannot modify files");
+		expect(script).toContain("blocked command:");
 	});
 });
 
@@ -1040,7 +1055,7 @@ describe("structural enforcement integration", () => {
 		expect(scoutMatchers).toEqual(reviewerMatchers);
 	});
 
-	test("lead has same guard structure as scout/reviewer", async () => {
+	test("lead has fewer guards than scout — no Write/Edit/NotebookEdit blocks or Bash file guard", async () => {
 		const leadPath = join(tempDir, "lead-wt");
 		const scoutPath = join(tempDir, "scout-wt");
 
@@ -1053,13 +1068,8 @@ describe("structural enforcement integration", () => {
 		const leadPreToolUse = JSON.parse(leadContent).hooks.PreToolUse;
 		const scoutPreToolUse = JSON.parse(scoutContent).hooks.PreToolUse;
 
-		// Same number of guards
-		expect(leadPreToolUse.length).toBe(scoutPreToolUse.length);
-
-		// Same matchers
-		const leadMatchers = leadPreToolUse.map((h: { matcher: string }) => h.matcher);
-		const scoutMatchers = scoutPreToolUse.map((h: { matcher: string }) => h.matcher);
-		expect(leadMatchers).toEqual(scoutMatchers);
+		// Scout has 4 extra guards: Write block, Edit block, NotebookEdit block, Bash file guard
+		expect(scoutPreToolUse.length).toBe(leadPreToolUse.length + 4);
 	});
 
 	test("builder and merger have identical guard structures", async () => {
