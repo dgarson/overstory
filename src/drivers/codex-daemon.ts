@@ -120,30 +120,38 @@ export class CodexDaemonDriver implements AgentDriver {
 		_from: string,
 		opts?: NudgeOptions,
 	): Promise<NudgeResult> {
-		const res = await fetch(`${this.daemonUrl}/agents/${agentName}/nudge`, {
-			method: "POST",
-			headers: this.authHeaders(),
-			body: JSON.stringify({ message, force: opts?.force }),
-		});
-		if (!res.ok) {
-			return { delivered: false, reason: `HTTP ${res.status}` };
+		try {
+			const res = await fetch(`${this.daemonUrl}/agents/${agentName}/nudge`, {
+				method: "POST",
+				headers: this.authHeaders(),
+				body: JSON.stringify({ message, force: opts?.force }),
+			});
+			if (!res.ok) {
+				return { delivered: false, reason: `HTTP ${res.status}` };
+			}
+			return (await res.json()) as NudgeResult;
+		} catch (err) {
+			return { delivered: false, reason: `Connection failed: ${String(err)}` };
 		}
-		return (await res.json()) as NudgeResult;
 	}
 
 	/**
 	 * Steer an agent by injecting input directly into its active turn.
-	 * POSTs to /agents/:name/steer. Returns false on HTTP error.
+	 * POSTs to /agents/:name/steer. Returns false on HTTP error or connection failure.
 	 */
 	async steer(agentName: string, input: string): Promise<boolean> {
-		const res = await fetch(`${this.daemonUrl}/agents/${agentName}/steer`, {
-			method: "POST",
-			headers: this.authHeaders(),
-			body: JSON.stringify({ input }),
-		});
-		if (!res.ok) return false;
-		const body = (await res.json()) as { delivered: boolean };
-		return body.delivered;
+		try {
+			const res = await fetch(`${this.daemonUrl}/agents/${agentName}/steer`, {
+				method: "POST",
+				headers: this.authHeaders(),
+				body: JSON.stringify({ input }),
+			});
+			if (!res.ok) return false;
+			const body = (await res.json()) as { delivered: boolean };
+			return body.delivered;
+		} catch {
+			return false;
+		}
 	}
 
 	/**
