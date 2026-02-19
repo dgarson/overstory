@@ -20,23 +20,18 @@
 
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { deployHooks } from "../agents/hooks-deployer.ts";
 import { createIdentity, loadIdentity } from "../agents/identity.ts";
 import { createManifestLoader } from "../agents/manifest.ts";
-import { writeOverlay } from "../agents/overlay.ts";
 import type { BeadIssue } from "../beads/client.ts";
 import { createBeadsClient } from "../beads/client.ts";
-import { writeCodexConfig } from "../codex/config-gen.ts";
-import { writeAgentsOverlay } from "../codex/overlay.ts";
-import { startServer } from "../codex/server.ts";
 import { loadConfig } from "../config.ts";
-import { AgentError, ConfigError, HierarchyError, ValidationError } from "../errors.ts";
+import { resolveDriverForSpawn } from "../drivers/resolve.ts";
+import { AgentError, HierarchyError, ValidationError } from "../errors.ts";
 import { createMulchClient } from "../mulch/client.ts";
 import { openSessionStore } from "../sessions/compat.ts";
 import { createRunStore } from "../sessions/store.ts";
 import type { AgentRuntime, AgentSession, OverlayConfig } from "../types.ts";
 import { createWorktree } from "../worktree/manager.ts";
-import { createSession, sendKeys } from "../worktree/tmux.ts";
 
 /**
  * Calculate how many milliseconds to sleep before spawning a new agent,
@@ -271,12 +266,6 @@ export async function slingCommand(args: string[]): Promise<void> {
 	const cwd = process.cwd();
 	const config = await loadConfig(cwd);
 
-	// 1b. Resolve runtime: --runtime flag > per-capability default from config > "claude"
-	const runtime: AgentRuntime = resolveRuntime(
-		runtimeFlag,
-		config.codex?.defaultRuntime[capability],
-	);
-
 	// 2. Validate depth limit
 	// Hierarchy: orchestrator(0) -> lead(1) -> specialist(2)
 	// With maxDepth=2, depth=2 is the deepest allowed leaf, so reject only depth > maxDepth
@@ -437,120 +426,42 @@ export async function slingCommand(args: string[]): Promise<void> {
 		// creation leaves an orphaned worktree on disk (review issue U5).
 		const tmuxSessionName = `overstory-${config.project.name}-${name}`;
 		const sessionId = `session-${Date.now()}-${name}`;
-		let pid: number;
 
-		try {
-			// 8b. Write the runtime-appropriate overlay file.
-			// Claude runtime: .claude/CLAUDE.md  |  Codex runtime: AGENTS.md (step 12a)
-			if (runtime === "claude") {
-				await writeOverlay(worktreePath, overlayConfig, config.project.root);
-			}
+		// Resolve driver using two-path resolution — persists runtime on session.
+		// resolveRuntimeForSpawn handles: flag > per-capability config > "claude",
+		// and upgrades "codex" + intraProcess=true to "codex-daemon".
+		const { runtime, driver } = await resolveDriverForSpawn(capability, config, runtimeFlag);
 
-			// 9. Deploy hooks config (capability-specific guards) — Claude runtime only.
-			// Codex agents don't use .claude/settings.local.json hooks; the bridge
-			// handles approval and event logging via RPC notifications.
-			if (runtime === "claude") {
-				await deployHooks(worktreePath, name, capability);
-			}
-
-			// 10. Claim beads issue
-			if (config.beads.enabled) {
-				try {
-					await beads.claim(taskId);
-				} catch {
-					// Non-fatal: issue may already be claimed
-				}
-			}
-
-			// 11. Create agent identity (if new)
-			const identityBaseDir = join(config.project.root, ".overstory", "agents");
-			const existingIdentity = await loadIdentity(identityBaseDir, name);
-			if (!existingIdentity) {
-				await createIdentity(identityBaseDir, {
-					name,
-					capability,
-					created: new Date().toISOString(),
-					sessionsCompleted: 0,
-					expertiseDomains: config.mulch.enabled ? config.mulch.domains : [],
-					recentTasks: [],
-				});
-			}
-
-			// 12. Create tmux session — path forks based on resolved runtime
-			if (runtime === "codex") {
-				if (!config.codex) {
-					throw new ConfigError("codex section is required in config when using runtime: codex", {
-						field: "codex",
-					});
-				}
-				const codexConfig = config.codex;
-
-				// 12a. Write AGENTS.md overlay (Codex uses AGENTS.md, not .claude/CLAUDE.md)
-				await writeAgentsOverlay(worktreePath, overlayConfig, config.project.root);
-
-				// 12b. Write .codex/config.toml
-				await writeCodexConfig(worktreePath, {
-					model: codexConfig.model,
-					approvalPolicy: "on-request",
-				});
-
-				// 12c. Ensure the shared Codex App Server is running
-				const serverState = await startServer(overstoryDir, codexConfig.serverPort);
-
-				// 12d. Spawn the bridge process in a tmux session
-				// The bridge connects to the App Server and drives the Codex agent lifecycle.
-				const bridgeScript = resolve(import.meta.dir, "../codex/bridge.ts");
-				// Use exec so the shell process is replaced by bun. This ensures
-				// #{pane_pid} returns the actual bridge PID, not a wrapper shell PID.
-				// Critical for SIGUSR1 nudge delivery (review issue #3).
-				const bridgeCmd = `exec bun run ${bridgeScript}`;
-				const bridgeEnv: Record<string, string> = {
-					OVERSTORY_AGENT_NAME: name,
-					OVERSTORY_WORKTREE_PATH: worktreePath,
-					OVERSTORY_CODEX_SERVER_URL: serverState.url,
-					OVERSTORY_CODEX_MODEL: codexConfig.model,
-					OVERSTORY_COMPACTION_THRESHOLD: String(codexConfig.compactionThreshold),
-					OVERSTORY_MAX_DELTA_BUFFER: String(codexConfig.maxDeltaBufferBytes),
-					OVERSTORY_APPROVAL_TIMEOUT: String(codexConfig.approvalTimeoutMs),
-					OVERSTORY_FILE_SCOPE: overlayConfig.fileScope.join(","),
-					OVERSTORY_PROJECT_ROOT: config.project.root,
-					OVERSTORY_BRANCH_NAME: branchName,
-					OVERSTORY_BEAD_ID: taskId,
-					OVERSTORY_CAPABILITY: capability,
-					OVERSTORY_PARENT_AGENT: parentAgent ?? "",
-					OVERSTORY_DEPTH: String(depth),
-					OVERSTORY_SESSION_ID: sessionId,
-					OVERSTORY_RUN_ID: runId,
-				};
-				pid = await createSession(tmuxSessionName, worktreePath, bridgeCmd, bridgeEnv);
-				// Bridge handles its own turn/start beacon — no send-keys needed
-			} else {
-				// 12e. Claude Code path: spawn claude in interactive mode and send beacon
-				const claudeCmd = `claude --model ${agentDef.model} --dangerously-skip-permissions`;
-				pid = await createSession(tmuxSessionName, worktreePath, claudeCmd, {
-					OVERSTORY_AGENT_NAME: name,
-					OVERSTORY_WORKTREE_PATH: worktreePath,
-				});
-			}
-		} catch (err) {
-			// Clean up the orphaned worktree created in step 7 (overstory-p4st, review U5)
+		// 10. Claim beads issue (shared step, before driver dispatch)
+		if (config.beads.enabled) {
 			try {
-				const cleanupProc = Bun.spawn(["git", "worktree", "remove", "--force", worktreePath], {
-					cwd: config.project.root,
-					stdout: "pipe",
-					stderr: "pipe",
-				});
-				await cleanupProc.exited;
+				await beads.claim(taskId);
 			} catch {
-				// Best-effort cleanup; the original error is more important
+				// Non-fatal: issue may already be claimed
 			}
-			throw err;
 		}
 
-		// 13. Record session BEFORE sending the beacon so that hook-triggered
+		// 11. Create agent identity (if new)
+		const identityBaseDir = join(config.project.root, ".overstory", "agents");
+		const existingIdentity = await loadIdentity(identityBaseDir, name);
+		if (!existingIdentity) {
+			await createIdentity(identityBaseDir, {
+				name,
+				capability,
+				created: new Date().toISOString(),
+				sessionsCompleted: 0,
+				expertiseDomains: config.mulch.enabled ? config.mulch.domains : [],
+				recentTasks: [],
+			});
+		}
+
+		// 13. Record session BEFORE calling driver.spawn so that hook-triggered
 		// updateLastActivity() can find the entry and transition booting->working.
 		// Without this, a race exists: hooks fire before the session is persisted,
 		// leaving the agent stuck in "booting" (overstory-036f).
+		// pid starts as null; updated after driver.spawn returns the real pid.
+		// tmuxSession uses a sentinel "daemon:<agentName>" for codex-daemon to avoid
+		// schema migration (sessions.tmuxSession is NOT NULL).
 		const session: AgentSession = {
 			id: sessionId,
 			agentName: name,
@@ -558,9 +469,9 @@ export async function slingCommand(args: string[]): Promise<void> {
 			worktreePath,
 			branchName,
 			beadId: taskId,
-			tmuxSession: tmuxSessionName,
+			tmuxSession: runtime === "codex-daemon" ? `daemon:${name}` : tmuxSessionName,
 			state: "booting",
-			pid,
+			pid: null,
 			parentAgent: parentAgent,
 			depth,
 			runId,
@@ -581,28 +492,49 @@ export async function slingCommand(args: string[]): Promise<void> {
 			runStore.close();
 		}
 
-		// 13b. For Claude runtime: send beacon prompt via tmux send-keys.
-		// The Codex bridge handles its own startup — no beacon needed.
-		if (runtime === "claude") {
-			// Allow Claude Code time to initialize its TUI before sending input.
-			// 3s gives the TUI enough time to render and attach its input handler.
-			await Bun.sleep(3_000);
-			const beacon = buildBeacon({
-				agentName: name,
-				capability,
-				taskId,
-				parentAgent,
-				depth,
-			});
-			await sendKeys(tmuxSessionName, beacon);
+		// Build the beacon text that the driver will send after the session starts.
+		// ClaudeDriver uses this; CodexBridgeDriver ignores it (bridge handles startup).
+		const beaconText = buildBeacon({
+			agentName: name,
+			capability,
+			taskId,
+			parentAgent,
+			depth,
+		});
 
-			// 13c. Send a follow-up Enter after a short delay to ensure submission.
-			// Claude Code's TUI may consume the first Enter during initialization,
-			// leaving the beacon text visible but unsubmitted (overstory-yhv6).
-			// A redundant Enter on an empty input line is harmless.
-			await Bun.sleep(500);
-			await sendKeys(tmuxSessionName, "");
+		// 12. Driver handles runtime-specific steps: overlay write, hooks deploy,
+		// process spawn, and beacon delivery.
+		let pid: number;
+		try {
+			const result = await driver.spawn({
+				config,
+				session,
+				overlayConfig,
+				worktreePath,
+				branchName,
+				tmuxSessionName,
+				runId,
+				model: agentDef.model,
+				beaconText,
+			});
+			pid = result.pid;
+		} catch (err) {
+			// Clean up the orphaned worktree created in step 7 (overstory-p4st, review U5)
+			try {
+				const cleanupProc = Bun.spawn(["git", "worktree", "remove", "--force", worktreePath], {
+					cwd: config.project.root,
+					stdout: "pipe",
+					stderr: "pipe",
+				});
+				await cleanupProc.exited;
+			} catch {
+				// Best-effort cleanup; the original error is more important
+			}
+			throw err;
 		}
+
+		// Update session with real pid now that the process is running.
+		store.upsert({ ...session, pid });
 
 		// 14. Output result
 		const output = {
@@ -612,7 +544,7 @@ export async function slingCommand(args: string[]): Promise<void> {
 			taskId,
 			branch: branchName,
 			worktree: worktreePath,
-			tmuxSession: tmuxSessionName,
+			tmuxSession: session.tmuxSession,
 			pid,
 			runtime,
 		};
