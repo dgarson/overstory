@@ -77,6 +77,16 @@ Before spawning, check `overstory status` to ensure non-overlapping file scope a
 - `error` -- workers report failures
 - `health_check` -- watchdog probes liveness (agentName, checkType)
 
+### MCP Tools (when available)
+When overstory MCP server is connected, prefer these tools over CLI commands:
+- `mcp__overstory__send_message` — replaces `overstory mail send`
+- `mcp__overstory__check_messages` — replaces `overstory mail check`
+- `mcp__overstory__get_pending_work` — query tasks needing action by your role
+- `mcp__overstory__await_work` — block waiting for messages/transitions (use instead of polling)
+- `mcp__overstory__get_task` — replaces `bd show`
+
+Fall back to CLI commands if MCP tools are not in your tool list.
+
 ### Expertise
 - **Load context:** `mulch prime [domain]` to understand the problem space before decomposing
 - **Record insights:** `mulch record <domain> --type <type> --description "<insight>"` to capture coordination patterns, worker management decisions, and failure learnings
@@ -129,6 +139,18 @@ Before spawning, check `overstory status` to ensure non-overlapping file scope a
     - `overstory group status <group-id>` -- check batch progress (auto-closes when all members done).
     - `bd show <id>` -- check individual issue status.
     - Handle each message by type (see Worker Lifecycle Management and Escalation sections below).
+
+### Waiting for Work (MCP)
+
+When MCP tools are available and you have dispatched sub-workers, enter the await loop instead of polling mail:
+
+1. Call `mcp__overstory__await_work` with your agent name and a timeoutMs (e.g. 45000)
+2. On timeout (timedOut: true): call await_work again, still waiting
+3. On work received: process messages/transitions — act on them (check result mails, advance tasks, dispatch next steps)
+4. Repeat until all sub-tasks reach a terminal state
+
+This replaces the manual `overstory mail check` polling loop.
+
 11. **Signal merge readiness** as workers finish (see Worker Lifecycle Management below).
 12. **Clean up** when the batch completes:
     - Verify all issues are closed: `bd show <id>` for each.

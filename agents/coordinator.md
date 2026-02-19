@@ -71,6 +71,16 @@ Coordinator (you, depth 0)
 - `question` -- leads ask for clarification
 - `error` -- leads report failures
 
+### MCP Tools (when available)
+When overstory MCP server is connected, prefer these tools over CLI commands:
+- `mcp__overstory__send_message` — replaces `overstory mail send`
+- `mcp__overstory__check_messages` — replaces `overstory mail check`
+- `mcp__overstory__get_pending_work` — query tasks needing action by your role
+- `mcp__overstory__await_work` — block waiting for messages/transitions (use instead of polling)
+- `mcp__overstory__get_task` — replaces `bd show`
+
+Fall back to CLI commands if MCP tools are not in your tool list.
+
 ### Expertise
 - **Load context:** `mulch prime [domain]` to understand the problem space before planning
 - **Record insights:** `mulch record <domain> --type <type> --description "<insight>"` to capture orchestration patterns, dispatch decisions, and failure learnings
@@ -107,6 +117,18 @@ Coordinator (you, depth 0)
    - `overstory status` -- check agent states (booting, working, completed, zombie).
    - `overstory group status <group-id>` -- check batch progress.
    - Handle each message by type (see Escalation Routing below).
+
+### Waiting for Work (MCP)
+
+When MCP tools are available and you have dispatched leads, enter the await loop instead of polling mail:
+
+1. Call `mcp__overstory__await_work` with your agent name and a timeoutMs (e.g. 60000)
+2. On timeout (timedOut: true): call await_work again, still waiting
+3. On work received: process messages/transitions — act on them (check result mails, advance tasks, dispatch next steps)
+4. Repeat until all sub-tasks reach a terminal state
+
+This replaces the manual `overstory mail check` polling loop.
+
 9. **Merge completed branches** as leads signal `merge_ready`:
     ```bash
     overstory merge --branch <lead-branch> --dry-run  # check first

@@ -43,6 +43,8 @@ export interface OverstoryConfig {
 		redactSecrets: boolean;
 	};
 	codex: CodexConfig;
+	mcp: McpConfig;
+	tickets: TicketsConfig;
 }
 
 export interface CodexConfig {
@@ -150,7 +152,8 @@ export type MailProtocolType =
 	| "escalation"
 	| "health_check"
 	| "dispatch"
-	| "assign";
+	| "assign"
+	| "scout_done";
 
 /** All valid mail message types. */
 export type MailMessageType = MailSemanticType | MailProtocolType;
@@ -169,6 +172,7 @@ export const MAIL_MESSAGE_TYPES: readonly MailMessageType[] = [
 	"health_check",
 	"dispatch",
 	"assign",
+	"scout_done",
 ] as const;
 
 export interface MailMessage {
@@ -247,6 +251,13 @@ export interface AssignPayload {
 	branch: string;
 }
 
+/** Scout signals exploration/spec is complete. */
+export interface ScoutDonePayload {
+	beadId: string;
+	specPath: string;
+	findings: string;
+}
+
 /** Maps protocol message types to their payload interfaces. */
 export interface MailPayloadMap {
 	worker_done: WorkerDonePayload;
@@ -257,6 +268,7 @@ export interface MailPayloadMap {
 	health_check: HealthCheckPayload;
 	dispatch: DispatchPayload;
 	assign: AssignPayload;
+	scout_done: ScoutDonePayload;
 }
 
 // === Overlay ===
@@ -277,6 +289,8 @@ export interface OverlayConfig {
 	baseDefinition: string;
 	/** Pre-fetched mulch expertise output to embed directly in the overlay. */
 	mulchExpertise?: string;
+	/** When true, include MCP section in overlay directing agents to use MCP tools. */
+	mcpEnabled?: boolean;
 }
 
 // === Merge Queue ===
@@ -693,4 +707,96 @@ export interface InsightAnalysis {
 	insights: SessionInsight[];
 	toolProfile: ToolProfile;
 	fileProfile: FileProfile;
+}
+
+// === MCP Server Configuration ===
+
+export interface McpConfig {
+	enabled: boolean;
+	port: number;
+	coordinatorIntervalMs: number;
+	idleThresholdMs: number;
+	awaitWorkMaxMs: number;
+}
+
+// === Tickets Configuration ===
+
+export interface TicketsConfig {
+	provider: string; // "beads" | "github" | "linear"
+}
+
+// === Workflow State Machine ===
+
+/** All possible workflow states for a task. */
+export type WorkflowState =
+	| "created"
+	| "assigned"
+	| "scouting"
+	| "building"
+	| "review_needed"
+	| "reviewing"
+	| "review_passed"
+	| "revision_needed"
+	| "merge_queued"
+	| "merging"
+	| "completed"
+	| "merge_blocked"
+	| "cancelled";
+
+/** Terminal states that cannot transition further (except cancelled). */
+export const TERMINAL_WORKFLOW_STATES: readonly WorkflowState[] = [
+	"completed",
+	"cancelled",
+] as const;
+
+/** Signals that trigger workflow state transitions. */
+export type WorkflowSignal =
+	| "dispatch"
+	| "assign"
+	| "claim"
+	| "scout_done"
+	| "worker_done"
+	| "review_passed"
+	| "review_failed"
+	| "merge_ready"
+	| "merged"
+	| "merge_failed"
+	| "cancel";
+
+/** Roles that can trigger transitions. */
+export type WorkflowRole =
+	| "coordinator"
+	| "supervisor"
+	| "lead"
+	| "scout"
+	| "builder"
+	| "reviewer"
+	| "merger";
+
+/** A task tracked by the workflow state machine. */
+export interface WorkflowTask {
+	id: string;
+	projectId: string;
+	currentState: WorkflowState;
+	assignedAgent: string | null;
+	branchName: string | null;
+	reviewCycleCount: number;
+	ticketId: string | null;
+	ticketProvider: string;
+	createdAt: string;
+	updatedAt: string;
+}
+
+/** A recorded state transition in the audit trail. */
+export interface WorkflowTransition {
+	id: number;
+	taskId: string;
+	projectId: string;
+	fromState: WorkflowState;
+	toState: WorkflowState;
+	signal: WorkflowSignal;
+	triggeredBy: string;
+	role: WorkflowRole;
+	metadata: string | null;
+	createdAt: string;
 }

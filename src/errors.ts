@@ -194,6 +194,49 @@ export class GroupError extends OverstoryError {
 }
 
 /**
+ * Raised when MCP server operations fail.
+ * Examples: server start/stop failures, transport errors, tool handler errors.
+ */
+export class McpServerError extends OverstoryError {
+	readonly port: number | null;
+
+	constructor(
+		message: string,
+		context?: {
+			port?: number;
+			cause?: Error;
+		},
+	) {
+		super(message, "MCP_SERVER_ERROR", { cause: context?.cause });
+		this.name = "McpServerError";
+		this.port = context?.port ?? null;
+	}
+}
+
+/**
+ * Raised when workflow state machine operations fail.
+ * Examples: invalid transitions, review cycle exceeded, store errors.
+ */
+export class WorkflowError extends OverstoryError {
+	readonly taskId: string | null;
+	readonly currentState: string | null;
+
+	constructor(
+		message: string,
+		context?: {
+			taskId?: string;
+			currentState?: string;
+			cause?: Error;
+		},
+	) {
+		super(message, "WORKFLOW_ERROR", { cause: context?.cause });
+		this.name = "WorkflowError";
+		this.taskId = context?.taskId ?? null;
+		this.currentState = context?.currentState ?? null;
+	}
+}
+
+/**
  * Raised when session lifecycle operations fail.
  * Examples: checkpoint save/restore failures, handoff failures.
  */

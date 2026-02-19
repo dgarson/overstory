@@ -53,6 +53,35 @@ export function formatMulchExpertise(expertise: string | undefined): string {
 	].join("\n");
 }
 
+/**
+ * Format the MCP section for agent overlays.
+ *
+ * When MCP is enabled, agents should prefer MCP tools over CLI commands for
+ * overstory operations. This section lists the available MCP tools and their
+ * CLI equivalents so agents know when to use each.
+ *
+ * Returns an empty string when MCP is disabled (placeholder removed silently).
+ */
+export function formatMcpSection(mcpEnabled: boolean | undefined): string {
+	if (!mcpEnabled) {
+		return "";
+	}
+	return [
+		"## MCP Tools (available)",
+		"",
+		"The overstory MCP server is connected. Prefer these tools over CLI commands:",
+		"- `mcp__overstory__send_message` — replaces `overstory mail send`",
+		"- `mcp__overstory__check_messages` — replaces `overstory mail check`",
+		"- `mcp__overstory__advance_task` — replaces `bd close` + `overstory mail send --type worker_done`",
+		"- `mcp__overstory__get_task` — replaces `bd show`",
+		"- `mcp__overstory__claim_task` — replaces `bd update --status in_progress`",
+		"- `mcp__overstory__get_pending_work` — query tasks needing action by your role",
+		"- `mcp__overstory__await_work` — block waiting for messages/transitions (coordination agents only)",
+		"",
+		"Fall back to CLI commands if MCP tools are not in your tool list.",
+	].join("\n");
+}
+
 /** Capabilities that are read-only and should not get quality gates for commits/tests/lint. */
 const READ_ONLY_CAPABILITIES = new Set(["scout", "reviewer"]);
 
@@ -192,6 +221,7 @@ export async function generateOverlay(config: OverlayConfig): Promise<string> {
 		"{{CONSTRAINTS}}": formatConstraints(config),
 		"{{SPEC_INSTRUCTION}}": specInstruction,
 		"{{BASE_DEFINITION}}": config.baseDefinition,
+		"{{MCP_SECTION}}": formatMcpSection(config.mcpEnabled),
 	};
 
 	let result = template;

@@ -43,7 +43,7 @@
 					},
 					{
 						"type": "command",
-						"command": "[ -z \"$OVERSTORY_AGENT_NAME\" ] && exit 0; overstory mail check --inject --agent {{AGENT_NAME}} --debounce 500"
+						"command": "[ -z \"$OVERSTORY_AGENT_NAME\" ] && exit 0; [ -n \"$OVERSTORY_MCP_ENABLED\" ] && exit 0; overstory mail check --inject --agent {{AGENT_NAME}} --debounce 500"
 					}
 				]
 			},

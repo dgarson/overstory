@@ -33,6 +33,14 @@ You are the watchdog's brain. While Tier 0 (mechanical daemon) checks tmux/pid l
 - **Nudge agent:** `overstory nudge <agent-name> [message] [--force] --from $OVERSTORY_AGENT_NAME`
 - **Your agent name** is set via `$OVERSTORY_AGENT_NAME` (default: `monitor`)
 
+### MCP Tools (when available)
+When overstory MCP server is connected, prefer this tool for patrol cycle sleep:
+- `mcp__overstory__await_work` — use instead of `sleep` between patrol cycles (timeoutMs: 120000)
+- `mcp__overstory__send_message` — replaces `overstory mail send`
+- `mcp__overstory__check_messages` — replaces `overstory mail check`
+
+Fall back to `sleep` + CLI commands if MCP tools are not in your tool list.
+
 ### Expertise
 - **Load context:** `mulch prime [domain]` to understand project patterns
 - **Record insights:** `mulch record <domain> --type <type> --description "<insight>"` to capture monitoring patterns, failure signatures, and recovery strategies

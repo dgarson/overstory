@@ -74,6 +74,14 @@ describe("checkLogs", () => {
 				maxDeltaBufferBytes: 1_048_576,
 				approvalTimeoutMs: 60_000,
 			},
+			mcp: {
+				enabled: false,
+				port: 21817,
+				coordinatorIntervalMs: 5_000,
+				idleThresholdMs: 60_000,
+				awaitWorkMaxMs: 300_000,
+			},
+			tickets: { provider: "beads" },
 		};
 
 		await mkdir(overstoryDir, { recursive: true });

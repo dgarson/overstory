@@ -159,6 +159,7 @@ export const COMMANDS: readonly CommandDef[] = [
 			{ name: "--branches", desc: "Clean branches" },
 			{ name: "--agents", desc: "Clean agent state" },
 			{ name: "--specs", desc: "Clean specs" },
+			{ name: "--workflow", desc: "Clean workflow database" },
 			{ name: "--json", desc: "JSON output" },
 			{ name: "--help", desc: "Show help" },
 		],
@@ -620,6 +621,31 @@ export const COMMANDS: readonly CommandDef[] = [
 			{
 				name: "status",
 				desc: "Show Codex App Server status",
+				flags: [{ name: "--json", desc: "JSON output" }],
+			},
+		],
+	},
+	{
+		name: "mcp",
+		desc: "Manage the MCP server",
+		flags: [
+			{ name: "--json", desc: "JSON output" },
+			{ name: "--help", desc: "Show help" },
+		],
+		subcommands: [
+			{
+				name: "start",
+				desc: "Start the MCP server",
+				flags: [{ name: "--json", desc: "JSON output" }],
+			},
+			{
+				name: "stop",
+				desc: "Stop the MCP server",
+				flags: [{ name: "--json", desc: "JSON output" }],
+			},
+			{
+				name: "status",
+				desc: "Show MCP server state",
 				flags: [{ name: "--json", desc: "JSON output" }],
 			},
 		],

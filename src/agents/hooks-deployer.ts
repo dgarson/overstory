@@ -474,20 +474,35 @@ export function getCapabilityGuards(capability: string): HookEntry[] {
 }
 
 /**
+ * Options for deployHooks.
+ */
+export interface DeployHooksOptions {
+	/** When true, writes a .mcp.json file to the worktree root pointing at the MCP server. */
+	mcpEnabled?: boolean;
+	/** MCP server port (defaults to 21817). Used when mcpEnabled is true. */
+	mcpPort?: number;
+}
+
+/**
  * Deploy hooks config to an agent's worktree as `.claude/settings.local.json`.
  *
  * Reads `templates/hooks.json.tmpl`, replaces `{{AGENT_NAME}}`, then merges
  * capability-specific PreToolUse guards into the resulting config.
  *
+ * When mcpEnabled is true, also writes a `.mcp.json` file to the worktree root
+ * that configures the overstory MCP server connection for Claude Code.
+ *
  * @param worktreePath - Absolute path to the agent's git worktree
  * @param agentName - The unique name of the agent
  * @param capability - Agent capability (builder, scout, reviewer, lead, merger)
+ * @param options - Additional deployment options (mcpEnabled, mcpPort)
  * @throws {AgentError} If the template is not found or the write fails
  */
 export async function deployHooks(
 	worktreePath: string,
 	agentName: string,
 	capability = "builder",
+	options: DeployHooksOptions = {},
 ): Promise<void> {
 	const templatePath = getTemplatePath();
 	const file = Bun.file(templatePath);
@@ -548,5 +563,27 @@ export async function deployHooks(
 			agentName,
 			cause: err instanceof Error ? err : undefined,
 		});
+	}
+
+	// When MCP is enabled, write .mcp.json to the worktree root so Claude Code
+	// automatically discovers and connects to the overstory MCP server.
+	if (options.mcpEnabled) {
+		const port = options.mcpPort ?? 21817;
+		const mcpConfig = {
+			mcpServers: {
+				overstory: {
+					url: `http://127.0.0.1:${port}/mcp`,
+				},
+			},
+		};
+		const mcpConfigPath = join(worktreePath, ".mcp.json");
+		try {
+			await Bun.write(mcpConfigPath, `${JSON.stringify(mcpConfig, null, "\t")}\n`);
+		} catch (err) {
+			throw new AgentError(`Failed to write .mcp.json to: ${mcpConfigPath}`, {
+				agentName,
+				cause: err instanceof Error ? err : undefined,
+			});
+		}
 	}
 }

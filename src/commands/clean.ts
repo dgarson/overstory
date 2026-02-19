@@ -116,6 +116,7 @@ interface CleanResult {
 	specsCleared: boolean;
 	nudgeStateCleared: boolean;
 	currentRunCleared: boolean;
+	workflowCleared: boolean;
 	mulchHealth: {
 		checked: boolean;
 		domainsNearLimit: Array<{ domain: string; recordCount: number; warnThreshold: number }>;
@@ -398,6 +399,7 @@ Flags:
   --branches      Delete all overstory/* branch refs
   --agents        Remove agent identity files
   --specs         Remove task spec files
+  --workflow      Delete workflow.db (MCP workflow state machine)
 
 Options:
   --json          Output as JSON
@@ -411,7 +413,7 @@ When --all is passed, ALL of the above are executed in safe order:
   1. Kill all overstory tmux sessions (processes first)
   2. Remove all worktrees
   3. Delete orphaned branch refs
-  4. Wipe mail.db, metrics.db, sessions.db, merge-queue.db
+  4. Wipe mail.db, metrics.db, sessions.db, merge-queue.db, workflow.db
   5. Clear logs, agents, specs, nudge state`;
 
 export async function cleanCommand(args: string[]): Promise<void> {
@@ -431,9 +433,18 @@ export async function cleanCommand(args: string[]): Promise<void> {
 	const doLogs = all || hasFlag(args, "--logs");
 	const doAgents = all || hasFlag(args, "--agents");
 	const doSpecs = all || hasFlag(args, "--specs");
+	const doWorkflow = all || hasFlag(args, "--workflow");
 
 	const anySelected =
-		doWorktrees || doBranches || doMail || doSessions || doMetrics || doLogs || doAgents || doSpecs;
+		doWorktrees ||
+		doBranches ||
+		doMail ||
+		doSessions ||
+		doMetrics ||
+		doLogs ||
+		doAgents ||
+		doSpecs ||
+		doWorkflow;
 
 	if (!anySelected) {
 		throw new ValidationError(
@@ -460,6 +471,7 @@ export async function cleanCommand(args: string[]): Promise<void> {
 		specsCleared: false,
 		nudgeStateCleared: false,
 		currentRunCleared: false,
+		workflowCleared: false,
 		mulchHealth: null,
 	};
 
@@ -517,6 +529,9 @@ export async function cleanCommand(args: string[]): Promise<void> {
 	if (all) {
 		result.mergeQueueCleared = await wipeSqliteDb(join(overstoryDir, "merge-queue.db"));
 	}
+	if (doWorkflow) {
+		result.workflowCleared = await wipeSqliteDb(join(overstoryDir, "workflow.db"));
+	}
 
 	// 7. Clear directories
 	if (doLogs) {
@@ -565,6 +580,7 @@ export async function cleanCommand(args: string[]): Promise<void> {
 	if (result.metricsWiped) lines.push("Wiped metrics.db");
 	if (result.sessionsCleared) lines.push("Wiped sessions.db");
 	if (result.mergeQueueCleared) lines.push("Wiped merge-queue.db");
+	if (result.workflowCleared) lines.push("Wiped workflow.db");
 	if (result.logsCleared) lines.push("Cleared logs/");
 	if (result.agentsCleared) lines.push("Cleared agents/");
 	if (result.specsCleared) lines.push("Cleared specs/");

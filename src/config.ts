@@ -57,6 +57,16 @@ export const DEFAULT_CONFIG: OverstoryConfig = {
 		maxDeltaBufferBytes: 1_048_576,
 		approvalTimeoutMs: 60_000,
 	},
+	mcp: {
+		enabled: false,
+		port: 21817,
+		coordinatorIntervalMs: 5_000,
+		idleThresholdMs: 60_000,
+		awaitWorkMaxMs: 300_000,
+	},
+	tickets: {
+		provider: "beads",
+	},
 };
 
 const CONFIG_FILENAME = "config.yaml";
@@ -481,6 +491,49 @@ function validateConfig(config: OverstoryConfig): void {
 		throw new ValidationError("codex.approvalTimeoutMs must be a positive integer", {
 			field: "codex.approvalTimeoutMs",
 			value: codex.approvalTimeoutMs,
+		});
+	}
+
+	// mcp config validation
+	const { mcp } = config;
+
+	// mcp.port must be an integer 1-65535
+	if (!Number.isInteger(mcp.port) || mcp.port < 1 || mcp.port > 65535) {
+		throw new ValidationError("mcp.port must be an integer between 1 and 65535", {
+			field: "mcp.port",
+			value: mcp.port,
+		});
+	}
+
+	// mcp.coordinatorIntervalMs must be positive
+	if (!Number.isInteger(mcp.coordinatorIntervalMs) || mcp.coordinatorIntervalMs < 1) {
+		throw new ValidationError("mcp.coordinatorIntervalMs must be a positive integer", {
+			field: "mcp.coordinatorIntervalMs",
+			value: mcp.coordinatorIntervalMs,
+		});
+	}
+
+	// mcp.idleThresholdMs must be positive
+	if (!Number.isInteger(mcp.idleThresholdMs) || mcp.idleThresholdMs < 1) {
+		throw new ValidationError("mcp.idleThresholdMs must be a positive integer", {
+			field: "mcp.idleThresholdMs",
+			value: mcp.idleThresholdMs,
+		});
+	}
+
+	// mcp.awaitWorkMaxMs must be positive
+	if (!Number.isInteger(mcp.awaitWorkMaxMs) || mcp.awaitWorkMaxMs < 1) {
+		throw new ValidationError("mcp.awaitWorkMaxMs must be a positive integer", {
+			field: "mcp.awaitWorkMaxMs",
+			value: mcp.awaitWorkMaxMs,
+		});
+	}
+
+	// tickets.provider must be a non-empty string
+	if (typeof config.tickets.provider !== "string" || config.tickets.provider.length === 0) {
+		throw new ValidationError("tickets.provider must be a non-empty string", {
+			field: "tickets.provider",
+			value: config.tickets.provider,
 		});
 	}
 }

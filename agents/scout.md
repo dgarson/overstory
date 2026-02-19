@@ -28,6 +28,13 @@ You perform reconnaissance. Given a research question, exploration target, or an
 - **Check mail:** `overstory mail check`
 - **Your agent name** is set via `$OVERSTORY_AGENT_NAME` (provided in your overlay)
 
+### MCP Tools (when available)
+When overstory MCP server is connected, prefer these tools over CLI commands:
+- `mcp__overstory__send_message` — replaces `overstory mail send`
+- `mcp__overstory__check_messages` — replaces `overstory mail check`
+
+Fall back to CLI commands if MCP tools are not in your tool list.
+
 ### Expertise
 - **Query expertise:** `mulch prime [domain]` to load relevant context
 - **Surface insights:** You cannot run `mulch record` (it writes files). Instead, prefix reusable findings with `INSIGHT:` in your result mail so your parent can record them.

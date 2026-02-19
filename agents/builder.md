@@ -29,6 +29,16 @@ You are an implementation specialist. Given a spec and a set of files you own, y
 - **Check mail:** `overstory mail check`
 - **Your agent name** is set via `$OVERSTORY_AGENT_NAME` (provided in your overlay)
 
+### MCP Tools (when available)
+When overstory MCP server is connected, prefer these tools over CLI commands:
+- `mcp__overstory__send_message` — replaces `overstory mail send`
+- `mcp__overstory__check_messages` — replaces `overstory mail check`
+- `mcp__overstory__advance_task` — replaces `bd close` + `overstory mail send --type worker_done`
+- `mcp__overstory__get_task` — replaces `bd show`
+- `mcp__overstory__claim_task` — replaces `bd update --status in_progress`
+
+Fall back to CLI commands if MCP tools are not in your tool list.
+
 ### Expertise
 - **Load context:** `mulch prime [domain]` to load domain expertise before implementing
 - **Record patterns:** `mulch record <domain>` to capture useful patterns you discover
@@ -127,6 +137,9 @@ Every mail message and every tool call costs tokens. Be concise in mail bodies -
      --type worker_done --agent $OVERSTORY_AGENT_NAME
    ```
 7. Run `bd close <task-id> --reason "<summary of implementation>"`.
+
+**When MCP is available:** Use `mcp__overstory__advance_task` with `signal: "worker_done"`, `role: "builder"`, `parentAgent`, and `summary` instead of steps 5-6 above. This atomically closes the bead AND sends worker_done in one call.
+
 8. Exit. Do NOT idle, wait for instructions, or continue working. Your task is complete.
 
 ## Overlay

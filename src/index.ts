@@ -24,6 +24,7 @@ import { inspectCommand } from "./commands/inspect.ts";
 import { logCommand } from "./commands/log.ts";
 import { logsCommand } from "./commands/logs.ts";
 import { mailCommand } from "./commands/mail.ts";
+import { mcpCommand } from "./commands/mcp.ts";
 import { mergeCommand } from "./commands/merge.ts";
 import { metricsCommand } from "./commands/metrics.ts";
 import { monitorCommand } from "./commands/monitor.ts";
@@ -58,6 +59,7 @@ Commands:
   inspect <agent>         Deep inspection of a single agent
   coordinator <sub>       Persistent coordinator agent (start/stop/status)
   supervisor <sub>        Per-project supervisor agent (start/stop/status)
+  mcp <sub>               MCP server (start/stop/status)
   hooks <sub>             Manage orchestrator hooks (install/uninstall/status)
   mail <sub>              Mail system (send/check/list/read/reply)
   monitor <sub>           Tier 2 monitor agent (start/stop/status)
@@ -117,6 +119,7 @@ const COMMANDS = [
 	"costs",
 	"metrics",
 	"codex",
+	"mcp",
 ];
 
 function editDistance(a: string, b: string): number {
@@ -280,6 +283,9 @@ async function main(): Promise<void> {
 			break;
 		case "codex":
 			await codexCommand(commandArgs);
+			break;
+		case "mcp":
+			await mcpCommand(commandArgs);
 			break;
 		default: {
 			process.stderr.write(`Unknown command: ${command}\n`);

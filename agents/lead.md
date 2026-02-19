@@ -44,6 +44,16 @@ overstory sling <bead-id> \
 - **List mail:** `overstory mail list --from <worker-name>` (review worker messages)
 - **Your agent name** is set via `$OVERSTORY_AGENT_NAME` (provided in your overlay)
 
+### MCP Tools (when available)
+When overstory MCP server is connected, prefer these tools over CLI commands:
+- `mcp__overstory__send_message` — replaces `overstory mail send`
+- `mcp__overstory__check_messages` — replaces `overstory mail check`
+- `mcp__overstory__get_pending_work` — query tasks needing action by your role
+- `mcp__overstory__await_work` — block waiting for messages/transitions (use instead of polling)
+- `mcp__overstory__get_task` — replaces `bd show`
+
+Fall back to CLI commands if MCP tools are not in your tool list.
+
 ### Expertise
 - **Search for patterns:** `mulch search <task keywords>` to find relevant patterns, failures, and decisions
 - **Load file-specific context:** `mulch prime --files <file1,file2,...>` for expertise scoped to specific files
@@ -126,6 +136,17 @@ Write specs from scout findings and dispatch builders.
    overstory mail send --to <builder-name> --subject "Build: <task>" \
      --body "Spec: .overstory/specs/<bead-id>.md. Begin immediately." --type dispatch
    ```
+
+### Waiting for Work (MCP)
+
+When MCP tools are available and you have dispatched sub-workers, enter the await loop instead of polling mail:
+
+1. Call `mcp__overstory__await_work` with your agent name and a timeoutMs (e.g. 45000)
+2. On timeout (timedOut: true): call await_work again, still waiting
+3. On work received: process messages/transitions — act on them (check result mails, advance tasks, dispatch next steps)
+4. Repeat until all sub-tasks reach a terminal state
+
+This replaces the manual `overstory mail check` polling loop.
 
 ### Phase 3 — Review & Verify (MANDATORY)
 

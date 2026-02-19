@@ -429,6 +429,7 @@ export async function slingCommand(args: string[]): Promise<void> {
 			capability,
 			baseDefinition,
 			mulchExpertise,
+			mcpEnabled: config.mcp.enabled,
 		};
 
 		// Steps 8b–12 are wrapped in a try/catch so that any failure cleans up
@@ -449,8 +450,35 @@ export async function slingCommand(args: string[]): Promise<void> {
 			// 9. Deploy hooks config (capability-specific guards) — Claude runtime only.
 			// Codex agents don't use .claude/settings.local.json hooks; the bridge
 			// handles approval and event logging via RPC notifications.
+			// When MCP is enabled, also writes .mcp.json to the worktree root.
 			if (runtime === "claude") {
-				await deployHooks(worktreePath, name, capability);
+				await deployHooks(worktreePath, name, capability, {
+					mcpEnabled: config.mcp.enabled,
+					mcpPort: config.mcp.port,
+				});
+			}
+
+			// 9b. If MCP is enabled and server is not running, start it in the background.
+			if (config.mcp.enabled && runtime === "claude") {
+				const { readServerState: readMcpState, isServerAlive: isMcpAlive } = await import(
+					"../mcp/state.ts"
+				);
+				const mcpState = await readMcpState(overstoryDir);
+				if (!mcpState || !isMcpAlive(mcpState)) {
+					const serverScript = join(config.project.root, "src", "mcp", "server.ts");
+					const mcpProc = Bun.spawn(["bun", serverScript], {
+						cwd: config.project.root,
+						detached: true,
+						stdout: "ignore",
+						stderr: "ignore",
+						stdin: "ignore",
+						env: {
+							...process.env,
+							OVERSTORY_MCP_PORT: String(config.mcp.port),
+						},
+					});
+					mcpProc.unref();
+				}
 			}
 
 			// 10. Claim beads issue
@@ -520,10 +548,14 @@ export async function slingCommand(args: string[]): Promise<void> {
 			} else {
 				// 12e. Claude Code path: spawn claude in interactive mode and send beacon
 				const claudeCmd = `claude --model ${agentDef.model} --dangerously-skip-permissions`;
-				pid = await createSession(tmuxSessionName, worktreePath, claudeCmd, {
+				const claudeEnv: Record<string, string> = {
 					OVERSTORY_AGENT_NAME: name,
 					OVERSTORY_WORKTREE_PATH: worktreePath,
-				});
+				};
+				if (config.mcp.enabled) {
+					claudeEnv.OVERSTORY_MCP_ENABLED = "1";
+				}
+				pid = await createSession(tmuxSessionName, worktreePath, claudeCmd, claudeEnv);
 			}
 		} catch (err) {
 			// Clean up the orphaned worktree created in step 7 (overstory-p4st, review U5)
