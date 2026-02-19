@@ -146,4 +146,24 @@ describe("DaemonServer", () => {
 		expect(res.status).toBe(200);
 		expect(pool.drainCalled).toBe(true);
 	});
+
+	test("POST /shutdown returns 401 without auth", async () => {
+		const pool = mockPool();
+		server = createDaemonServer({ port: 0, pool, token: TOKEN });
+		const res = await fetch(`${server.url}shutdown`, { method: "POST" });
+		expect(res.status).toBe(401);
+		expect(pool.drainCalled).toBe(false);
+	});
+
+	test("GET /agents/:name returns 404 for unknown agent", async () => {
+		server = createDaemonServer({ port: 0, pool: mockPool(), token: TOKEN });
+		const res = await fetch(`${server.url}agents/nonexistent`);
+		expect(res.status).toBe(404);
+	});
+
+	test("GET /unknown-route returns 404", async () => {
+		server = createDaemonServer({ port: 0, pool: mockPool(), token: TOKEN });
+		const res = await fetch(`${server.url}unknown`);
+		expect(res.status).toBe(404);
+	});
 });
