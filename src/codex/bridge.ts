@@ -1108,6 +1108,14 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 		}
 	});
 
+	// SIGTERM handler: set flag and close active connection so the reconnect loop exits cleanly.
+	// Registered here (alongside SIGUSR1) so it persists across reconnects via refs.
+	let shutdownRequested = false;
+	process.on("SIGTERM", () => {
+		shutdownRequested = true;
+		refs.rpc?.close();
+	});
+
 	// Reconnect loop: retry on unexpected disconnects, stop on normal shutdown
 	let lastProgressSummary = "";
 	let reconnectAttempt = 0;
@@ -1127,10 +1135,11 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 		if (result.normalShutdown) break;
 
 		reconnectAttempt++;
-		if (!shouldAttemptReconnect(false, reconnectAttempt, config.maxReconnectAttempts)) {
-			console.error(
-				`[bridge] WebSocket disconnected. Max reconnect attempts (${config.maxReconnectAttempts}) reached, giving up.`,
-			);
+		if (!shouldAttemptReconnect(shutdownRequested, reconnectAttempt, config.maxReconnectAttempts)) {
+			const reason = shutdownRequested
+				? "SIGTERM received, not reconnecting."
+				: `Max reconnect attempts (${config.maxReconnectAttempts}) reached, giving up.`;
+			console.error(`[bridge] WebSocket disconnected. ${reason}`);
 			break;
 		}
 
