@@ -153,10 +153,7 @@ export async function ensureDaemonRunning(
 		let state: DaemonState | null = null;
 		while (state === null) {
 			if (Date.now() > startDeadline) {
-				throw new OverstoryError(
-					"Daemon failed to start within 5 seconds",
-					"DAEMON_START_TIMEOUT",
-				);
+				throw new OverstoryError("Daemon failed to start within 5 seconds", "DAEMON_START_TIMEOUT");
 			}
 			await new Promise((r) => setTimeout(r, 100));
 			const file = Bun.file(statePath);

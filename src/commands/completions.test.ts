@@ -12,8 +12,8 @@ import {
 } from "./completions.ts";
 
 describe("COMMANDS array", () => {
-	it("should have exactly 30 commands", () => {
-		expect(COMMANDS).toHaveLength(30);
+	it("should have exactly 31 commands", () => {
+		expect(COMMANDS).toHaveLength(31);
 	});
 
 	it("should include all expected command names", () => {
