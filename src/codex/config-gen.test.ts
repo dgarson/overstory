@@ -17,10 +17,10 @@ test("generates valid TOML with dangerFullAccess and on-request", () => {
 
 test("generates TOML with different approval policy", () => {
 	const toml = generateCodexConfig({
-		model: "codex-mini-latest",
+		model: "gpt-5.3-codex",
 		approvalPolicy: "unless-allowed",
 	});
-	expect(toml).toContain('model = "codex-mini-latest"');
+	expect(toml).toContain('model = "gpt-5.3-codex"');
 	expect(toml).toContain('approval_policy = "unless-allowed"');
 });
 
