@@ -364,7 +364,6 @@ async function startCoordinator(args: string[], deps: CoordinatorDeps = {}): Pro
 			lastActivity: new Date().toISOString(),
 			escalationLevel: 0,
 			stalledSince: null,
-			runtime: "claude",
 		};
 
 		store.upsert(session);

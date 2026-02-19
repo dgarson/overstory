@@ -210,7 +210,6 @@ describe("checkConsistency", () => {
 			lastActivity: new Date().toISOString(),
 			escalationLevel: 0,
 			stalledSince: null,
-			runtime: "claude",
 		});
 		store.close();
 
@@ -247,7 +246,6 @@ describe("checkConsistency", () => {
 			lastActivity: new Date().toISOString(),
 			escalationLevel: 0,
 			stalledSince: null,
-			runtime: "claude",
 		});
 		store.close();
 
@@ -283,7 +281,6 @@ describe("checkConsistency", () => {
 			lastActivity: new Date().toISOString(),
 			escalationLevel: 0,
 			stalledSince: null,
-			runtime: "claude",
 		});
 		store.close();
 
@@ -320,7 +317,6 @@ describe("checkConsistency", () => {
 			lastActivity: new Date().toISOString(),
 			escalationLevel: 0,
 			stalledSince: null,
-			runtime: "claude",
 		});
 		store.close();
 
@@ -360,7 +356,6 @@ describe("checkConsistency", () => {
 			lastActivity: new Date().toISOString(),
 			escalationLevel: 0,
 			stalledSince: null,
-			runtime: "claude",
 		});
 		store.close();
 
@@ -434,7 +429,6 @@ describe("checkConsistency", () => {
 			lastActivity: new Date().toISOString(),
 			escalationLevel: 0,
 			stalledSince: null,
-			runtime: "claude",
 		});
 
 		store.upsert({
@@ -454,7 +448,6 @@ describe("checkConsistency", () => {
 			lastActivity: new Date().toISOString(),
 			escalationLevel: 0,
 			stalledSince: null,
-			runtime: "claude",
 		});
 		store.close();
 
@@ -491,7 +484,6 @@ describe("checkConsistency", () => {
 				lastActivity: new Date().toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
-				runtime: "claude",
 			});
 		}
 
@@ -512,7 +504,6 @@ describe("checkConsistency", () => {
 			lastActivity: new Date().toISOString(),
 			escalationLevel: 0,
 			stalledSince: null,
-			runtime: "claude",
 		});
 		store.close();
 
@@ -547,7 +538,6 @@ describe("checkConsistency", () => {
 				lastActivity: new Date().toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
-				runtime: "claude",
 			});
 
 			store.upsert({
@@ -567,7 +557,6 @@ describe("checkConsistency", () => {
 				lastActivity: new Date().toISOString(),
 				escalationLevel: 0,
 				stalledSince: null,
-				runtime: "claude",
 			});
 		}
 		store.close();
@@ -611,7 +600,6 @@ describe("checkConsistency", () => {
 			lastActivity: new Date().toISOString(),
 			escalationLevel: 0,
 			stalledSince: null,
-			runtime: "claude",
 		});
 
 		store.upsert({
@@ -631,7 +619,6 @@ describe("checkConsistency", () => {
 			lastActivity: new Date().toISOString(),
 			escalationLevel: 0,
 			stalledSince: null,
-			runtime: "claude",
 		});
 
 		// Lead-2 has builders only (bad)
@@ -652,7 +639,6 @@ describe("checkConsistency", () => {
 			lastActivity: new Date().toISOString(),
 			escalationLevel: 0,
 			stalledSince: null,
-			runtime: "claude",
 		});
 		store.close();
 

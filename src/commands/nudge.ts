@@ -113,7 +113,7 @@ async function resolveTargetSession(
 		if (session && session.state !== "zombie" && session.state !== "completed") {
 			return {
 				tmuxSession: session.tmuxSession,
-				runtime: session.runtime,
+				runtime: session.runtime ?? "claude",
 				bridgePid: session.pid,
 			};
 		}

@@ -173,7 +173,6 @@ describe("--all", () => {
 			lastActivity: new Date().toISOString(),
 			escalationLevel: 0,
 			stalledSince: null,
-			runtime: "claude",
 		});
 		store.close();
 
@@ -318,7 +317,6 @@ describe("individual flags", () => {
 			lastActivity: new Date().toISOString(),
 			escalationLevel: 0,
 			stalledSince: null,
-			runtime: "claude",
 		});
 		store.close();
 
@@ -440,7 +438,6 @@ describe("synthetic session-end events", () => {
 			lastActivity: new Date().toISOString(),
 			escalationLevel: 0,
 			stalledSince: null,
-			runtime: "claude",
 			...overrides,
 		};
 	}

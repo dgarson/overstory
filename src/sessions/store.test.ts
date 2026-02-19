@@ -46,7 +46,6 @@ function makeSession(overrides: Partial<AgentSession> = {}): AgentSession {
 		lastActivity: "2026-01-15T10:00:00.000Z",
 		escalationLevel: 0,
 		stalledSince: null,
-		runtime: "claude" as AgentRuntime,
 		...overrides,
 	};
 }
