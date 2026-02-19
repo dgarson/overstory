@@ -34,6 +34,8 @@ export function parseServerState(raw: string): CodexServerState | null {
 
 /** Check if the server process is still alive */
 export function isServerAlive(state: CodexServerState): boolean {
+	// pid <= 0 is a sentinel meaning "external server, not started by us"
+	if (state.pid <= 0) return false;
 	try {
 		process.kill(state.pid, 0);
 		return true;
@@ -76,6 +78,12 @@ export async function startServer(overstoryDir: string, port: number): Promise<C
 
 	if (exited !== null) {
 		const stderr = await new Response(proc.stderr).text();
+		// Port already in use: an existing server we didn't start is running.
+		// Return its URL without writing codex-server.json — stopServer will
+		// never find a state file for it and will leave it alone.
+		if (stderr.includes("Address already in use")) {
+			return { pid: 0, port, startedAt: new Date().toISOString(), url };
+		}
 		throw new Error(`Codex App Server exited immediately (code ${exited}): ${stderr.trim()}`);
 	}
 

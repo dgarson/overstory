@@ -30,6 +30,11 @@ test("isServerAlive returns false for dead PID", () => {
 	expect(isServerAlive({ pid: 99999999, port: 21816, startedAt: "", url: "" })).toBe(false);
 });
 
+test("isServerAlive returns false for pid=0 sentinel (external server)", () => {
+	// pid=0 means we connected to a server we didn't start — never report it as alive
+	expect(isServerAlive({ pid: 0, port: 21816, startedAt: "", url: "" })).toBe(false);
+});
+
 test("isServerAlive returns true for own process PID", () => {
 	expect(isServerAlive({ pid: process.pid, port: 21816, startedAt: "", url: "" })).toBe(true);
 });
