@@ -366,6 +366,25 @@ models:
 `);
 		await expect(loadConfig(tempDir)).rejects.toThrow(ValidationError);
 	});
+
+	test("rejects codex.daemonPort outside 0-65535", async () => {
+		await writeConfig(`
+codex:
+  enabled: true
+  daemonPort: -1
+`);
+		await expect(loadConfig(tempDir)).rejects.toThrow("codex.daemonPort");
+	});
+
+	test("accepts codex.daemonPort of 0 for dynamic allocation", async () => {
+		await writeConfig(`
+codex:
+  enabled: true
+  daemonPort: 0
+`);
+		const config = await loadConfig(tempDir);
+		expect(config.codex?.daemonPort).toBe(0);
+	});
 });
 
 describe("resolveProjectRoot", () => {
@@ -502,5 +521,7 @@ describe("DEFAULT_CONFIG", () => {
 		expect(codex?.compactionThreshold).toBe(0.8);
 		expect(codex?.maxDeltaBufferBytes).toBe(1_048_576);
 		expect(codex?.approvalTimeoutMs).toBe(60_000);
+		expect(codex?.intraProcess).toBe(false);
+		expect(codex?.daemonPort).toBe(0);
 	});
 });

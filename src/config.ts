@@ -56,6 +56,8 @@ export const DEFAULT_CONFIG: OverstoryConfig = {
 		compactionThreshold: 0.8,
 		maxDeltaBufferBytes: 1_048_576,
 		approvalTimeoutMs: 60_000,
+		intraProcess: false,
+		daemonPort: 0,
 	},
 };
 
@@ -481,6 +483,14 @@ function validateConfig(config: OverstoryConfig): void {
 		throw new ValidationError("codex.approvalTimeoutMs must be a positive integer", {
 			field: "codex.approvalTimeoutMs",
 			value: codex.approvalTimeoutMs,
+		});
+	}
+
+	// codex.daemonPort must be an integer 0-65535 (0 = dynamic OS-assigned port)
+	if (!Number.isInteger(codex.daemonPort) || codex.daemonPort < 0 || codex.daemonPort > 65535) {
+		throw new ValidationError("codex.daemonPort must be an integer between 0 and 65535", {
+			field: "codex.daemonPort",
+			value: codex.daemonPort,
 		});
 	}
 }

@@ -54,3 +54,5 @@ codex:
   defaultRuntime:
     builder: codex
     reviewer: codex
+  intraProcess: false     # false = bridge (per-agent process), true = daemon (sidecar)
+  daemonPort: 0           # 0 = dynamic (OS-assigned), >0 = fixed port
