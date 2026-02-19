@@ -26,12 +26,15 @@ import { createManifestLoader, resolveModel } from "../agents/manifest.ts";
 import { writeOverlay } from "../agents/overlay.ts";
 import type { BeadIssue } from "../beads/client.ts";
 import { createBeadsClient } from "../beads/client.ts";
+import { writeCodexConfig } from "../codex/config-gen.ts";
+import { writeAgentsOverlay } from "../codex/overlay.ts";
+import { startServer } from "../codex/server.ts";
 import { loadConfig } from "../config.ts";
 import { AgentError, HierarchyError, ValidationError } from "../errors.ts";
 import { createMulchClient } from "../mulch/client.ts";
 import { openSessionStore } from "../sessions/compat.ts";
 import { createRunStore } from "../sessions/store.ts";
-import type { AgentSession, OverlayConfig } from "../types.ts";
+import type { AgentRuntime, AgentSession, OverlayConfig } from "../types.ts";
 import { createWorktree } from "../worktree/manager.ts";
 import { createSession, sendKeys } from "../worktree/tmux.ts";
 
@@ -73,6 +76,25 @@ function getFlag(args: string[], flag: string): string | undefined {
 		return undefined;
 	}
 	return args[idx + 1];
+}
+
+/**
+ * Resolve the execution runtime for an agent spawn.
+ *
+ * Priority order:
+ *   1. Explicit --runtime flag value (from CLI args)
+ *   2. Per-capability default from config.codex.defaultRuntime
+ *   3. Hard default: "claude"
+ *
+ * @param runtimeFlag - The value of the --runtime CLI flag, if provided
+ * @param capabilityDefault - The per-capability default from config (may be undefined)
+ * @returns The resolved AgentRuntime
+ */
+export function resolveRuntime(
+	runtimeFlag: AgentRuntime | undefined,
+	capabilityDefault: AgentRuntime | undefined,
+): AgentRuntime {
+	return runtimeFlag ?? capabilityDefault ?? "claude";
 }
 
 /**
@@ -185,6 +207,7 @@ Options:
   --parent <agent-name>      Parent agent for hierarchy tracking
   --depth <n>                Current hierarchy depth (default: 0)
   --force-hierarchy            Bypass hierarchy validation (debugging only)
+  --runtime <runtime>        Execution runtime: claude | codex (default: claude)
   --json                     Output result as JSON
   --help, -h                 Show this help`;
 
@@ -209,6 +232,7 @@ export async function slingCommand(args: string[]): Promise<void> {
 	const depthStr = getFlag(args, "--depth");
 	const depth = depthStr !== undefined ? Number.parseInt(depthStr, 10) : 0;
 	const forceHierarchy = args.includes("--force-hierarchy");
+	const runtimeFlag = getFlag(args, "--runtime") as AgentRuntime | undefined;
 
 	if (!name || name.trim().length === 0) {
 		throw new ValidationError("--name is required for sling", { field: "name" });
@@ -246,6 +270,12 @@ export async function slingCommand(args: string[]): Promise<void> {
 	// 1. Load config
 	const cwd = process.cwd();
 	const config = await loadConfig(cwd);
+
+	// 1b. Resolve runtime: --runtime flag > per-capability default from config > "claude"
+	const runtime: AgentRuntime = resolveRuntime(
+		runtimeFlag,
+		config.codex.defaultRuntime[capability],
+	);
 
 	// 2. Validate depth limit
 	// Hierarchy: orchestrator(0) -> lead(1) -> specialist(2)
@@ -401,8 +431,15 @@ export async function slingCommand(args: string[]): Promise<void> {
 			mulchExpertise,
 		};
 
+		// 8b. Write the runtime-appropriate overlay file.
+		// Claude runtime: .claude/CLAUDE.md  |  Codex runtime: AGENTS.md
+		// Both use the same OverlayConfig; the template and destination differ.
 		try {
-			await writeOverlay(worktreePath, overlayConfig, config.project.root);
+			if (runtime === "claude") {
+				await writeOverlay(worktreePath, overlayConfig, config.project.root);
+			}
+			// Codex overlay (AGENTS.md) is written later in step 12 alongside
+			// the other Codex-specific setup (.codex/config.toml, server start).
 		} catch (err) {
 			// Clean up the orphaned worktree created in step 7 (overstory-p4st)
 			try {
@@ -444,21 +481,64 @@ export async function slingCommand(args: string[]): Promise<void> {
 			});
 		}
 
-		// 12. Create tmux session running claude in interactive mode
+		// 12. Create tmux session — path forks based on resolved runtime
 		const tmuxSessionName = `overstory-${config.project.name}-${name}`;
 		const model = resolveModel(config, manifest, capability, agentDef.model);
-		const claudeCmd = `claude --model ${model} --dangerously-skip-permissions`;
-		const pid = await createSession(tmuxSessionName, worktreePath, claudeCmd, {
-			OVERSTORY_AGENT_NAME: name,
-			OVERSTORY_WORKTREE_PATH: worktreePath,
-		});
+		const sessionId = `session-${Date.now()}-${name}`;
+		let pid: number;
+
+		if (runtime === "codex") {
+			// 12a. Write AGENTS.md overlay (Codex uses AGENTS.md, not .claude/CLAUDE.md)
+			await writeAgentsOverlay(worktreePath, overlayConfig, config.project.root);
+
+			// 12b. Write .codex/config.toml
+			await writeCodexConfig(worktreePath, {
+				model: config.codex.model,
+				approvalPolicy: "on-request",
+			});
+
+			// 12c. Ensure the shared Codex App Server is running
+			const serverState = await startServer(overstoryDir, config.codex.serverPort);
+
+			// 12d. Spawn the bridge process in a tmux session
+			// The bridge connects to the App Server and drives the Codex agent lifecycle.
+			const bridgeScript = resolve(import.meta.dir, "../codex/bridge.ts");
+			const bridgeCmd = `bun run ${bridgeScript}`;
+			const bridgeEnv: Record<string, string> = {
+				OVERSTORY_AGENT_NAME: name,
+				OVERSTORY_WORKTREE_PATH: worktreePath,
+				OVERSTORY_CODEX_SERVER_URL: serverState.url,
+				OVERSTORY_CODEX_MODEL: config.codex.model,
+				OVERSTORY_COMPACTION_THRESHOLD: String(config.codex.compactionThreshold),
+				OVERSTORY_MAX_DELTA_BUFFER: String(config.codex.maxDeltaBufferBytes),
+				OVERSTORY_APPROVAL_TIMEOUT: String(config.codex.approvalTimeoutMs),
+				OVERSTORY_FILE_SCOPE: overlayConfig.fileScope.join(","),
+				OVERSTORY_PROJECT_ROOT: config.project.root,
+				OVERSTORY_BRANCH_NAME: branchName,
+				OVERSTORY_BEAD_ID: taskId,
+				OVERSTORY_CAPABILITY: capability,
+				OVERSTORY_PARENT_AGENT: parentAgent ?? "",
+				OVERSTORY_DEPTH: String(depth),
+				OVERSTORY_SESSION_ID: sessionId,
+				OVERSTORY_RUN_ID: runId,
+			};
+			pid = await createSession(tmuxSessionName, worktreePath, bridgeCmd, bridgeEnv);
+			// Bridge handles its own turn/start beacon — no send-keys needed
+		} else {
+			// 12e. Claude Code path: spawn claude in interactive mode and send beacon
+			const claudeCmd = `claude --model ${model} --dangerously-skip-permissions`;
+			pid = await createSession(tmuxSessionName, worktreePath, claudeCmd, {
+				OVERSTORY_AGENT_NAME: name,
+				OVERSTORY_WORKTREE_PATH: worktreePath,
+			});
+		}
 
 		// 13. Record session BEFORE sending the beacon so that hook-triggered
 		// updateLastActivity() can find the entry and transition booting->working.
 		// Without this, a race exists: hooks fire before the session is persisted,
 		// leaving the agent stuck in "booting" (overstory-036f).
 		const session: AgentSession = {
-			id: `session-${Date.now()}-${name}`,
+			id: sessionId,
 			agentName: name,
 			capability,
 			worktreePath,
@@ -474,7 +554,7 @@ export async function slingCommand(args: string[]): Promise<void> {
 			lastActivity: new Date().toISOString(),
 			escalationLevel: 0,
 			stalledSince: null,
-			runtime: "claude",
+			runtime,
 		};
 
 		store.upsert(session);
@@ -487,25 +567,28 @@ export async function slingCommand(args: string[]): Promise<void> {
 			runStore.close();
 		}
 
-		// 13b. Send beacon prompt via tmux send-keys
-		// Allow Claude Code time to initialize its TUI before sending input.
-		// 3s gives the TUI enough time to render and attach its input handler.
-		await Bun.sleep(3_000);
-		const beacon = buildBeacon({
-			agentName: name,
-			capability,
-			taskId,
-			parentAgent,
-			depth,
-		});
-		await sendKeys(tmuxSessionName, beacon);
+		// 13b. For Claude runtime: send beacon prompt via tmux send-keys.
+		// The Codex bridge handles its own startup — no beacon needed.
+		if (runtime === "claude") {
+			// Allow Claude Code time to initialize its TUI before sending input.
+			// 3s gives the TUI enough time to render and attach its input handler.
+			await Bun.sleep(3_000);
+			const beacon = buildBeacon({
+				agentName: name,
+				capability,
+				taskId,
+				parentAgent,
+				depth,
+			});
+			await sendKeys(tmuxSessionName, beacon);
 
-		// 13c. Send a follow-up Enter after a short delay to ensure submission.
-		// Claude Code's TUI may consume the first Enter during initialization,
-		// leaving the beacon text visible but unsubmitted (overstory-yhv6).
-		// A redundant Enter on an empty input line is harmless.
-		await Bun.sleep(500);
-		await sendKeys(tmuxSessionName, "");
+			// 13c. Send a follow-up Enter after a short delay to ensure submission.
+			// Claude Code's TUI may consume the first Enter during initialization,
+			// leaving the beacon text visible but unsubmitted (overstory-yhv6).
+			// A redundant Enter on an empty input line is harmless.
+			await Bun.sleep(500);
+			await sendKeys(tmuxSessionName, "");
+		}
 
 		// 14. Output result
 		const output = {
@@ -516,17 +599,19 @@ export async function slingCommand(args: string[]): Promise<void> {
 			worktree: worktreePath,
 			tmuxSession: tmuxSessionName,
 			pid,
+			runtime,
 		};
 
 		if (args.includes("--json")) {
 			process.stdout.write(`${JSON.stringify(output)}\n`);
 		} else {
-			process.stdout.write(`🚀 Agent "${name}" launched!\n`);
+			process.stdout.write(`Agent "${name}" launched!\n`);
 			process.stdout.write(`   Task:     ${taskId}\n`);
 			process.stdout.write(`   Branch:   ${branchName}\n`);
 			process.stdout.write(`   Worktree: ${worktreePath}\n`);
 			process.stdout.write(`   Tmux:     ${tmuxSessionName}\n`);
 			process.stdout.write(`   PID:      ${pid}\n`);
+			process.stdout.write(`   Runtime:  ${runtime}\n`);
 		}
 	} finally {
 		store.close();
