@@ -60,6 +60,10 @@ export interface CodexConfig {
 	maxDeltaBufferBytes: number;
 	/** Approval escalation timeout in ms */
 	approvalTimeoutMs: number;
+	/** Use intra-process daemon instead of per-agent bridge processes */
+	intraProcess: boolean;
+	/** HTTP port for the CodexDaemon sidecar. 0 = dynamic (OS-assigned). */
+	daemonPort: number;
 }
 
 // === Agent Manifest ===
@@ -99,7 +103,7 @@ export type Capability = (typeof SUPPORTED_CAPABILITIES)[number];
 export type AgentState = "booting" | "working" | "completed" | "stalled" | "zombie";
 
 /** Execution runtime for an agent */
-export type AgentRuntime = "claude" | "codex";
+export type AgentRuntime = "claude" | "codex" | "codex-daemon";
 
 export interface AgentSession {
 	id: string; // Unique session ID

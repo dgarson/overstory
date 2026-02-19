@@ -376,6 +376,15 @@ codex:
 		await expect(loadConfig(tempDir)).rejects.toThrow("codex.daemonPort");
 	});
 
+	test("rejects codex.daemonPort above 65535", async () => {
+		await writeConfig(`
+codex:
+  enabled: true
+  daemonPort: 65536
+`);
+		await expect(loadConfig(tempDir)).rejects.toThrow("codex.daemonPort");
+	});
+
 	test("accepts codex.daemonPort of 0 for dynamic allocation", async () => {
 		await writeConfig(`
 codex:
