@@ -2,7 +2,7 @@
 // AgentDriver interface: pluggable strategy for agent lifecycle management.
 // Three implementations: ClaudeDriver, CodexBridgeDriver, CodexDaemonDriver.
 
-import type { AgentRuntime, AgentSession, AgentState, OverlayConfig, OverstoryConfig } from "../types";
+import type { AgentSession, AgentState, OverlayConfig, OverstoryConfig } from "../types";
 
 /** Context passed to the driver at spawn time. sling owns steps 1-11; driver handles 12+. */
 export interface SpawnContext {
@@ -13,6 +13,12 @@ export interface SpawnContext {
 	branchName: string;
 	tmuxSessionName: string;
 	runId: string;
+	/** Resolved model string (e.g. "claude-opus-4-5"). sling resolves this from manifest+config.
+	 *  Required for ClaudeDriver; unused by CodexBridgeDriver (which reads model from config). */
+	model?: string;
+	/** Pre-built beacon text to send via tmux send-keys after the session starts.
+	 *  Required for ClaudeDriver; unused by CodexBridgeDriver (bridge handles its own startup). */
+	beaconText?: string;
 }
 
 /** Result of a successful spawn */
@@ -63,7 +69,12 @@ export interface AgentDriver {
 
 	/** Indirect: wake agent and have it check mail.
 	 *  Returns NudgeResult with delivery status for watchdog telemetry. */
-	nudge(agentName: string, message: string, from: string, opts?: NudgeOptions): Promise<NudgeResult>;
+	nudge(
+		agentName: string,
+		message: string,
+		from: string,
+		opts?: NudgeOptions,
+	): Promise<NudgeResult>;
 
 	/** Direct: inject a message into the agent's active turn/session.
 	 *  Returns true if delivered, false if no active turn (caller should fall back to mail). */
