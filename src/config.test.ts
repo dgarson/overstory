@@ -486,7 +486,7 @@ describe("DEFAULT_CONFIG", () => {
 		expect(DEFAULT_CONFIG.watchdog.zombieThresholdMs).toBe(600_000);
 		expect(DEFAULT_CONFIG.codex.enabled).toBe(false);
 		expect(DEFAULT_CONFIG.codex.serverPort).toBe(21816);
-		expect(DEFAULT_CONFIG.codex.model).toBe("codex-mini-latest");
+		expect(DEFAULT_CONFIG.codex.model).toBe("gpt-5.3-codex");
 		expect(DEFAULT_CONFIG.codex.compactionThreshold).toBe(0.8);
 		expect(DEFAULT_CONFIG.codex.maxDeltaBufferBytes).toBe(1_048_576);
 		expect(DEFAULT_CONFIG.codex.approvalTimeoutMs).toBe(60_000);
