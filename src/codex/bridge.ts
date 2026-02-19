@@ -39,7 +39,7 @@ export function parseBridgeConfig(env: Record<string, string | undefined>): Brid
 		parentAgent: env.OVERSTORY_PARENT_AGENT || null,
 		depth: Number(env.OVERSTORY_DEPTH ?? "0"),
 		runId: env.OVERSTORY_RUN_ID || null,
-		sessionId: env.OVERSTORY_SESSION_ID ?? "",
+		sessionId: env.OVERSTORY_SESSION_ID || "",
 		serverUrl: env.OVERSTORY_CODEX_SERVER_URL ?? "ws://127.0.0.1:21816",
 		model: env.OVERSTORY_CODEX_MODEL ?? "o3",
 		compactionThreshold: Number(env.OVERSTORY_COMPACTION_THRESHOLD ?? "0.8"),

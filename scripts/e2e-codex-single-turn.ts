@@ -283,7 +283,7 @@ const traceResult = await run([
 	"trace",
 	AGENT_NAME,
 	"--limit",
-	"30",
+	"500",
 	"--json",
 ]);
 if (traceResult.exitCode === 0) {
