@@ -249,7 +249,17 @@ export async function nudgeAgent(
 
 	let result: { delivered: boolean; reason?: string };
 
-	if (target.runtime === "codex") {
+	if (target.runtime === "codex-daemon") {
+		// CodexDaemonDriver.nudge() sends HTTP POST to the daemon sidecar.
+		const { CodexDaemonDriver } = await import("../drivers/codex-daemon.ts");
+		const { readDaemonStateSync } = await import("../codex/daemon/lifecycle.ts");
+		const state = readDaemonStateSync(overstoryDir);
+		if (!state) {
+			return { delivered: false, reason: "Codex daemon is not running" };
+		}
+		const driver = new CodexDaemonDriver({ daemonUrl: state.url, token: state.token });
+		result = await driver.nudge(agentName, message, "orchestrator", { force });
+	} else if (target.runtime === "codex") {
 		// CodexBridgeDriver.nudge() requires overstoryDir to locate mail.db and bridge.pid.
 		// Construct with minimal nudge-only deps to avoid loading spawn-related modules
 		// (codex/overlay.ts, etc.) that require the generated bundled-defs.ts artifact.

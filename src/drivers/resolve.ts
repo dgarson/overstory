@@ -1,5 +1,4 @@
 import { join } from "node:path";
-import { OverstoryError } from "../errors";
 import type { AgentRuntime, OverstoryConfig } from "../types";
 import type { AgentDriver } from "./types";
 
@@ -97,19 +96,23 @@ export async function resolveDriverForSession(
 			return new CodexBridgeDriver(deps, overstoryDir);
 		}
 		case "codex-daemon": {
-			const [{ CodexDaemonDriver }, { readDaemonStateSync }] = await Promise.all([
-				import("./codex-daemon.ts"),
-				import("../codex/daemon/lifecycle.ts"),
-			]);
+			const [{ CodexDaemonDriver }, { readDaemonStateSync, isDaemonAlive, ensureDaemonRunning }] =
+				await Promise.all([import("./codex-daemon.ts"), import("../codex/daemon/lifecycle.ts")]);
 			const overstoryDir = join(config.project.root, ".overstory");
 			const state = readDaemonStateSync(overstoryDir);
-			if (!state) {
-				throw new OverstoryError(
-					"Codex daemon is not running — start it with 'overstory daemon start'",
-					"DAEMON_NOT_RUNNING",
-				);
-			}
-			return new CodexDaemonDriver({ daemonUrl: state.url, token: state.token });
+
+			const startOpts = {
+				port: config.codex?.daemonPort ?? 0,
+				codexServerUrl: `ws://127.0.0.1:${config.codex?.serverPort ?? 21816}`,
+				projectRoot: config.project.root,
+			};
+			const injectedEnsure = (dir: string) => ensureDaemonRunning(dir, startOpts);
+
+			return new CodexDaemonDriver({
+				daemonUrl: state && isDaemonAlive(state) ? state.url : "",
+				token: state && isDaemonAlive(state) ? state.token : "",
+				ensureDaemonRunning: injectedEnsure,
+			});
 		}
 	}
 }

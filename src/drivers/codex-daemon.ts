@@ -6,6 +6,7 @@
 // This driver translates AgentDriver calls into HTTP requests to the daemon's REST API.
 
 import type { DaemonState } from "../codex/daemon/lifecycle.ts";
+import { ConfigError } from "../errors.ts";
 import type {
 	AgentDriver,
 	AgentInspection,
@@ -65,6 +66,13 @@ export class CodexDaemonDriver implements AgentDriver {
 	 * so pid is always 0.
 	 */
 	async spawn(ctx: SpawnContext): Promise<SpawnResult> {
+		if (!ctx.config.codex) {
+			throw new ConfigError(
+				"codex section is required in config when using runtime: codex-daemon",
+				{ field: "codex" },
+			);
+		}
+		const codexConfig = ctx.config.codex;
 		const overstoryDir = `${ctx.config.project.root}/.overstory`;
 
 		if (this._ensureDaemonRunning !== undefined) {
@@ -73,7 +81,8 @@ export class CodexDaemonDriver implements AgentDriver {
 			this.token = state.token;
 		}
 
-		// Build the BridgeConfig from SpawnContext fields (mirrors CodexBridgeDriver.spawn)
+		// Build the BridgeConfig from SpawnContext + codex config (mirrors CodexBridgeDriver.spawn)
+		// serverUrl is empty here — the daemon stamps it server-side from its own env var.
 		const bridgeConfig = {
 			agentName: ctx.session.agentName,
 			worktreePath: ctx.worktreePath,
@@ -85,14 +94,14 @@ export class CodexDaemonDriver implements AgentDriver {
 			runId: ctx.runId,
 			sessionId: ctx.session.id,
 			serverUrl: "",
-			model: ctx.model ?? "claude-opus-4-5",
-			compactionThreshold: 0,
-			maxDeltaBufferBytes: 0,
-			approvalTimeoutMs: 0,
+			model: codexConfig.model,
+			compactionThreshold: codexConfig.compactionThreshold,
+			maxDeltaBufferBytes: codexConfig.maxDeltaBufferBytes,
+			approvalTimeoutMs: codexConfig.approvalTimeoutMs,
 			fileScope: ctx.overlayConfig.fileScope,
 			projectRoot: ctx.config.project.root,
-			maxReconnectAttempts: 0,
-			reconnectBaseDelayMs: 0,
+			maxReconnectAttempts: 3,
+			reconnectBaseDelayMs: 2000,
 		};
 
 		const res = await fetch(`${this.daemonUrl}/agents`, {
@@ -121,7 +130,7 @@ export class CodexDaemonDriver implements AgentDriver {
 		opts?: NudgeOptions,
 	): Promise<NudgeResult> {
 		try {
-			const res = await fetch(`${this.daemonUrl}/agents/${agentName}/nudge`, {
+			const res = await fetch(`${this.daemonUrl}/agents/${encodeURIComponent(agentName)}/nudge`, {
 				method: "POST",
 				headers: this.authHeaders(),
 				body: JSON.stringify({ message, force: opts?.force }),
@@ -141,7 +150,7 @@ export class CodexDaemonDriver implements AgentDriver {
 	 */
 	async steer(agentName: string, input: string): Promise<boolean> {
 		try {
-			const res = await fetch(`${this.daemonUrl}/agents/${agentName}/steer`, {
+			const res = await fetch(`${this.daemonUrl}/agents/${encodeURIComponent(agentName)}/steer`, {
 				method: "POST",
 				headers: this.authHeaders(),
 				body: JSON.stringify({ input }),
@@ -159,7 +168,7 @@ export class CodexDaemonDriver implements AgentDriver {
 	 * Throws if the daemon returns an error status.
 	 */
 	async inspect(agentName: string): Promise<AgentInspection> {
-		const res = await fetch(`${this.daemonUrl}/agents/${agentName}`, {
+		const res = await fetch(`${this.daemonUrl}/agents/${encodeURIComponent(agentName)}`, {
 			headers: { Authorization: `Bearer ${this.token}` },
 		});
 		if (!res.ok) {
@@ -173,7 +182,7 @@ export class CodexDaemonDriver implements AgentDriver {
 	 * Best-effort: ignores HTTP errors since the agent may already be gone.
 	 */
 	async shutdown(agentName: string): Promise<void> {
-		await fetch(`${this.daemonUrl}/agents/${agentName}`, {
+		await fetch(`${this.daemonUrl}/agents/${encodeURIComponent(agentName)}`, {
 			method: "DELETE",
 			headers: this.authHeaders(),
 		});

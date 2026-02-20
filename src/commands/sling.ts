@@ -183,7 +183,7 @@ Options:
   --parent <agent-name>      Parent agent for hierarchy tracking
   --depth <n>                Current hierarchy depth (default: 0)
   --force-hierarchy            Bypass hierarchy validation (debugging only)
-  --runtime <runtime>        Execution runtime: claude | codex (default: claude)
+  --runtime <runtime>        Execution runtime: claude | codex | codex-daemon (default: claude)
   --json                     Output result as JSON
   --help, -h                 Show this help`;
 

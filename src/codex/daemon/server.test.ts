@@ -235,6 +235,80 @@ describe("DaemonServer", () => {
 		expect(res.status).toBe(404);
 	});
 
+	test("POST /agents returns 400 for malformed JSON body", async () => {
+		server = createDaemonServer({ port: 0, pool: mockPool(), token: TOKEN });
+		const res = await fetch(`${server.url}agents`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${TOKEN}`,
+			},
+			body: "not valid json{{{",
+		});
+		expect(res.status).toBe(400);
+		const text = await res.text();
+		expect(text).toContain("malformed JSON");
+	});
+
+	test("POST /agents/:name/nudge returns 400 for malformed JSON body", async () => {
+		server = createDaemonServer({ port: 0, pool: mockPool(), token: TOKEN });
+		const res = await fetch(`${server.url}agents/test-agent/nudge`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${TOKEN}`,
+			},
+			body: "{{invalid",
+		});
+		expect(res.status).toBe(400);
+	});
+
+	test("POST /agents/:name/steer returns 400 for malformed JSON body", async () => {
+		server = createDaemonServer({ port: 0, pool: mockPool(), token: TOKEN });
+		const res = await fetch(`${server.url}agents/test-agent/steer`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${TOKEN}`,
+			},
+			body: "{{invalid",
+		});
+		expect(res.status).toBe(400);
+	});
+
+	test("stamps codexServerUrl into config when provided", async () => {
+		const pool = mockPool();
+		server = createDaemonServer({
+			port: 0,
+			pool,
+			token: TOKEN,
+			codexServerUrl: "ws://127.0.0.1:9999",
+		});
+		const config = makeBridgeConfig({ agentName: "test-agent", serverUrl: "" });
+		const res = await fetch(`${server.url}agents`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${TOKEN}`,
+			},
+			body: JSON.stringify(config),
+		});
+		expect(res.status).toBe(201);
+	});
+
+	test("URL-encoded agent names are decoded correctly", async () => {
+		const pool = mockPool();
+		server = createDaemonServer({ port: 0, pool, token: TOKEN });
+		// Add agent with special characters
+		await fetch(`${server.url}agents`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
+			body: JSON.stringify(makeBridgeConfig({ agentName: "agent/special" })),
+		});
+		const res = await fetch(`${server.url}agents/${encodeURIComponent("agent/special")}`);
+		expect(res.status).toBe(200);
+	});
+
 	test("GET /agents/:name returns 200 for known agent", async () => {
 		const pool = mockPool();
 		server = createDaemonServer({ port: 0, pool, token: TOKEN });

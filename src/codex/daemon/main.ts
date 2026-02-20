@@ -20,7 +20,8 @@ if (import.meta.main) {
 		createRpcClient: (url) => createRpcClientWithRetry(url),
 	});
 
-	const server = createDaemonServer({ port, pool, token });
+	const codexServerUrl = process.env.OVERSTORY_CODEX_SERVER_URL ?? "";
+	const server = createDaemonServer({ port, pool, token, codexServerUrl });
 
 	// Write state file so CLI can discover URL and token
 	const stateFile = `${overstoryDir}/daemon.json`;

@@ -7,10 +7,12 @@ export interface DaemonServerOpts {
 	pool: AgentPool;
 	token: string;
 	hostname?: string; // defaults to "127.0.0.1" (localhost only)
+	/** Codex App Server WebSocket URL — stamped into each BridgeConfig before pool.add() */
+	codexServerUrl?: string;
 }
 
 export function createDaemonServer(opts: DaemonServerOpts): ReturnType<typeof Bun.serve> {
-	const { pool, token, hostname = "127.0.0.1" } = opts;
+	const { pool, token, hostname = "127.0.0.1", codexServerUrl } = opts;
 
 	function requireAuth(req: Request): Response | null {
 		const auth = req.headers.get("authorization");
@@ -45,8 +47,9 @@ export function createDaemonServer(opts: DaemonServerOpts): ReturnType<typeof Bu
 			// GET /agents/:name — unauthenticated read-only inspect
 			const agentMatch = url.pathname.match(/^\/agents\/([^/]+)$/);
 			if (agentMatch && method === "GET") {
-				const agentName = agentMatch[1];
-				if (!agentName) return new Response("Not Found", { status: 404 });
+				const rawName = agentMatch[1];
+				if (!rawName) return new Response("Not Found", { status: 404 });
+				const agentName = decodeURIComponent(rawName);
 				const agent = pool.get(agentName);
 				if (!agent) return new Response("Not Found", { status: 404 });
 				return Response.json(agent);
@@ -57,7 +60,12 @@ export function createDaemonServer(opts: DaemonServerOpts): ReturnType<typeof Bu
 			if (url.pathname === "/agents" && method === "POST") {
 				const authErr = requireAuth(req);
 				if (authErr) return authErr;
-				const raw: unknown = await req.json();
+				let raw: unknown;
+				try {
+					raw = await req.json();
+				} catch {
+					return new Response("Bad Request: malformed JSON", { status: 400 });
+				}
 				if (
 					typeof raw !== "object" ||
 					raw === null ||
@@ -67,6 +75,10 @@ export function createDaemonServer(opts: DaemonServerOpts): ReturnType<typeof Bu
 					return new Response("Bad Request", { status: 400 });
 				}
 				const config = raw as BridgeConfig;
+				// Stamp the daemon's codexServerUrl into the config if not already set
+				if (codexServerUrl && !config.serverUrl) {
+					config.serverUrl = codexServerUrl;
+				}
 				await pool.add(config);
 				return new Response(null, { status: 201 });
 			}
@@ -76,9 +88,15 @@ export function createDaemonServer(opts: DaemonServerOpts): ReturnType<typeof Bu
 			if (nudgeMatch && method === "POST") {
 				const authErr = requireAuth(req);
 				if (authErr) return authErr;
-				const agentName = nudgeMatch[1];
-				if (!agentName) return new Response("Not Found", { status: 404 });
-				const raw: unknown = await req.json();
+				const rawName = nudgeMatch[1];
+				if (!rawName) return new Response("Not Found", { status: 404 });
+				const agentName = decodeURIComponent(rawName);
+				let raw: unknown;
+				try {
+					raw = await req.json();
+				} catch {
+					return new Response("Bad Request: malformed JSON", { status: 400 });
+				}
 				if (
 					typeof raw !== "object" ||
 					raw === null ||
@@ -97,9 +115,15 @@ export function createDaemonServer(opts: DaemonServerOpts): ReturnType<typeof Bu
 			if (steerMatch && method === "POST") {
 				const authErr = requireAuth(req);
 				if (authErr) return authErr;
-				const agentName = steerMatch[1];
-				if (!agentName) return new Response("Not Found", { status: 404 });
-				const raw: unknown = await req.json();
+				const rawName = steerMatch[1];
+				if (!rawName) return new Response("Not Found", { status: 404 });
+				const agentName = decodeURIComponent(rawName);
+				let raw: unknown;
+				try {
+					raw = await req.json();
+				} catch {
+					return new Response("Bad Request: malformed JSON", { status: 400 });
+				}
 				if (
 					typeof raw !== "object" ||
 					raw === null ||
@@ -118,8 +142,9 @@ export function createDaemonServer(opts: DaemonServerOpts): ReturnType<typeof Bu
 			if (deleteMatch && method === "DELETE") {
 				const authErr = requireAuth(req);
 				if (authErr) return authErr;
-				const agentName = deleteMatch[1];
-				if (!agentName) return new Response("Not Found", { status: 404 });
+				const rawName = deleteMatch[1];
+				if (!rawName) return new Response("Not Found", { status: 404 });
+				const agentName = decodeURIComponent(rawName);
 				await pool.remove(agentName);
 				return new Response(null, { status: 204 });
 			}

@@ -39,7 +39,17 @@ function makeSpawnContext(overrides: Partial<SpawnContext> = {}): SpawnContext {
 			},
 			models: {},
 			logging: { verbose: false, redactSecrets: false },
-			codex: undefined,
+			codex: {
+				enabled: true,
+				defaultRuntime: {},
+				intraProcess: true,
+				model: "o3",
+				serverPort: 21816,
+				compactionThreshold: 0.8,
+				maxDeltaBufferBytes: 1_048_576,
+				approvalTimeoutMs: 60_000,
+				daemonPort: 0,
+			},
 		},
 		session: {
 			id: "sess-001",

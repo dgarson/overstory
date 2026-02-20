@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { OverstoryError } from "../errors";
 import type { AgentRuntime, OverstoryConfig } from "../types";
 import {
 	resolveDriverForSession,
@@ -110,19 +109,14 @@ function makeConfig(overrides?: { codex?: OverstoryConfig["codex"] }): Overstory
  * via direct driver instantiation for claude and codex runtimes.
  */
 describe("resolveDriverForSession — codex-daemon", () => {
-	test("throws DAEMON_NOT_RUNNING when daemon.json does not exist", async () => {
+	test("returns CodexDaemonDriver with ensureDaemonRunning when daemon.json does not exist", async () => {
 		const config = makeConfig();
-		// /tmp/test-project/.overstory/daemon.json does not exist
-		try {
-			await resolveDriverForSession("codex-daemon", config);
-			throw new Error("Expected error to be thrown");
-		} catch (err) {
-			expect(err).toBeInstanceOf(OverstoryError);
-			expect((err as OverstoryError).code).toBe("DAEMON_NOT_RUNNING");
-		}
+		// No daemon.json → driver is returned with ensureDaemonRunning injected (auto-start)
+		const driver = await resolveDriverForSession("codex-daemon", config);
+		expect(driver.name).toBe("codex-daemon");
 	});
 
-	test("returns CodexDaemonDriver when daemon.json is valid", async () => {
+	test("returns CodexDaemonDriver with live state when daemon.json is valid", async () => {
 		const tmpDir = mkdtempSync(join(tmpdir(), "overstory-resolve-test-"));
 		const overstoryDir = join(tmpDir, ".overstory");
 		mkdirSync(overstoryDir);
@@ -154,7 +148,7 @@ describe("resolveDriverForSpawn — runtime resolution", () => {
 	// resolution to resolveRuntimeForSpawn. The codex-daemon cases exercise the
 	// full factory path (reads daemon.json; throws DAEMON_NOT_RUNNING if absent).
 
-	test("codex + intraProcess=true resolves to codex-daemon, throws DAEMON_NOT_RUNNING when no daemon", async () => {
+	test("codex + intraProcess=true resolves to codex-daemon with auto-start injected", async () => {
 		const config = makeConfig({
 			codex: {
 				enabled: true,
@@ -168,23 +162,19 @@ describe("resolveDriverForSpawn — runtime resolution", () => {
 				daemonPort: 0,
 			},
 		});
-		try {
-			await resolveDriverForSpawn("builder", config);
-			throw new Error("Expected error to be thrown");
-		} catch (err) {
-			expect(err).toBeInstanceOf(OverstoryError);
-			expect((err as OverstoryError).code).toBe("DAEMON_NOT_RUNNING");
-		}
+		const { runtime, driver } = await resolveDriverForSpawn("builder", config);
+		expect(runtime).toBe("codex-daemon");
+		expect(driver.name).toBe("codex-daemon");
 	});
 
-	test("explicit codex-daemon runtimeFlag throws DAEMON_NOT_RUNNING when no daemon", async () => {
-		try {
-			await resolveDriverForSpawn("builder", makeConfig(), "codex-daemon");
-			throw new Error("Expected error to be thrown");
-		} catch (err) {
-			expect(err).toBeInstanceOf(OverstoryError);
-			expect((err as OverstoryError).code).toBe("DAEMON_NOT_RUNNING");
-		}
+	test("explicit codex-daemon runtimeFlag returns driver with auto-start", async () => {
+		const { runtime, driver } = await resolveDriverForSpawn(
+			"builder",
+			makeConfig(),
+			"codex-daemon",
+		);
+		expect(runtime).toBe("codex-daemon");
+		expect(driver.name).toBe("codex-daemon");
 	});
 
 	test("resolveRuntimeForSpawn is used: no codex config defaults to 'claude'", () => {

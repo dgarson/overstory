@@ -3,7 +3,7 @@
 // Provides state read/parse/check, bearer token generation, and daemon start/stop.
 
 import { randomBytes } from "node:crypto";
-import { closeSync, openSync, readFileSync, unlinkSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync } from "node:fs";
 import { chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -95,6 +95,9 @@ export async function ensureDaemonRunning(
 	overstoryDir: string,
 	opts: DaemonStartOpts,
 ): Promise<DaemonState> {
+	// Ensure .overstory/ directory exists before attempting lock file creation
+	mkdirSync(overstoryDir, { recursive: true });
+
 	const lockPath = join(overstoryDir, "daemon.lock");
 	const statePath = join(overstoryDir, "daemon.json");
 
@@ -104,7 +107,12 @@ export async function ensureDaemonRunning(
 	while (lockFd === null) {
 		try {
 			lockFd = openSync(lockPath, "wx");
-		} catch {
+		} catch (err: unknown) {
+			// Only retry on EEXIST (lock contention); rethrow other errors immediately
+			const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
+			if (code !== "EEXIST") {
+				throw err;
+			}
 			if (Date.now() > lockDeadline) {
 				throw new OverstoryError(
 					"Timeout waiting for daemon.lock — another process may be starting the daemon",
@@ -183,6 +191,8 @@ export async function ensureDaemonRunning(
 	}
 }
 
+export type StopDaemonResult = "stopped" | "cleaned" | "not-found";
+
 /**
  * Stop the daemon sidecar.
  *
@@ -191,11 +201,12 @@ export async function ensureDaemonRunning(
  * Always removes daemon.json on return.
  *
  * @param overstoryDir - Path to .overstory/ directory
- * @returns true if the daemon was running and was stopped, false if it wasn't running
+ * @returns "stopped" if daemon was alive and terminated, "cleaned" if stale state was removed,
+ *          "not-found" if no daemon state existed
  */
-export async function stopDaemon(overstoryDir: string): Promise<boolean> {
+export async function stopDaemon(overstoryDir: string): Promise<StopDaemonResult> {
 	const state = readDaemonStateSync(overstoryDir);
-	if (!state) return false;
+	if (!state) return "not-found";
 
 	// Try graceful HTTP shutdown first
 	let stopped = false;
@@ -231,5 +242,5 @@ export async function stopDaemon(overstoryDir: string): Promise<boolean> {
 		// Already gone — fine
 	}
 
-	return stopped;
+	return stopped ? "stopped" : "cleaned";
 }

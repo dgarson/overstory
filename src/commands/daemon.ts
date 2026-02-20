@@ -70,15 +70,21 @@ async function stopDaemonCmd(args: string[]): Promise<void> {
 	const config = await loadConfig(cwd);
 	const overstoryDir = join(config.project.root, ".overstory");
 
-	const stopped = await stopDaemon(overstoryDir);
+	const result = await stopDaemon(overstoryDir);
 
 	if (json) {
-		process.stdout.write(`${JSON.stringify({ stopped })}\n`);
+		process.stdout.write(`${JSON.stringify({ result })}\n`);
 	} else {
-		if (stopped) {
-			process.stdout.write("Codex daemon stopped\n");
-		} else {
-			process.stdout.write("No Codex daemon was running\n");
+		switch (result) {
+			case "stopped":
+				process.stdout.write("Codex daemon stopped\n");
+				break;
+			case "cleaned":
+				process.stdout.write("Cleaned up stale daemon state (process was already dead)\n");
+				break;
+			case "not-found":
+				process.stdout.write("No Codex daemon was running\n");
+				break;
 		}
 	}
 }

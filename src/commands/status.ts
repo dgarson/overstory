@@ -107,9 +107,10 @@ export async function gatherStatus(
 		// indicates it should be alive, mark it as zombie
 		for (const session of sessions) {
 			if (
-				session.state === "booting" ||
-				session.state === "working" ||
-				session.state === "stalled"
+				(session.state === "booting" ||
+					session.state === "working" ||
+					session.state === "stalled") &&
+				(session.runtime === "claude" || !session.runtime)
 			) {
 				const tmuxAlive = tmuxSessions.some((s) => s.name === session.tmuxSession);
 				if (!tmuxAlive) {
