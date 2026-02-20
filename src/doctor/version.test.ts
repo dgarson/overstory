@@ -98,14 +98,12 @@ describe("checkVersion", () => {
 		expect(syncCheck).toBeDefined();
 
 		if (syncCheck?.status === "pass") {
-			// Should include version details
+			// Should include version details (verified at build time via BUNDLED_VERSION)
 			expect(syncCheck.details).toBeDefined();
 			expect(syncCheck.details?.length).toBeGreaterThan(0);
 
-			// Details should mention both package.json and src/index.ts
 			const detailsText = syncCheck.details?.join(" ");
-			expect(detailsText).toContain("package.json");
-			expect(detailsText).toContain("src/index.ts");
+			expect(detailsText).toMatch(/version:/);
 		}
 	});
 

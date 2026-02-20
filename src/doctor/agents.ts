@@ -3,7 +3,6 @@ import { join } from "node:path";
 import type { AgentManifest } from "../types.ts";
 import type { DoctorCheck, DoctorCheckFn } from "./types.ts";
 
-const VALID_MODELS = new Set(["sonnet", "opus", "haiku"]);
 const VALID_NAME_REGEX = /^[a-zA-Z0-9_-]+$/;
 
 /**
@@ -64,8 +63,8 @@ async function loadAndValidateManifest(
 				errors.push(`Agent "${name}": "file" must be a non-empty string`);
 			}
 
-			if (typeof agentDef.model !== "string" || !VALID_MODELS.has(agentDef.model)) {
-				errors.push(`Agent "${name}": "model" must be one of: sonnet, opus, haiku`);
+			if (typeof agentDef.model !== "string" || agentDef.model.length === 0) {
+				errors.push(`Agent "${name}": "model" must be a non-empty string`);
 			}
 
 			if (!Array.isArray(agentDef.tools)) {

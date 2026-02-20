@@ -22,6 +22,7 @@
 import { existsSync } from "node:fs";
 import { readdir, rm, unlink } from "node:fs/promises";
 import { join } from "node:path";
+import { stopServer } from "../codex/server.ts";
 import { loadConfig } from "../config.ts";
 import { ValidationError } from "../errors.ts";
 import { createEventStore } from "../events/store.ts";
@@ -104,6 +105,7 @@ async function logSyntheticSessionEndEvents(overstoryDir: string): Promise<numbe
 
 interface CleanResult {
 	sessionEndEventsLogged: number;
+	codexServerStopped: boolean;
 	tmuxKilled: number;
 	worktreesCleaned: number;
 	branchesDeleted: number;
@@ -448,6 +450,7 @@ export async function cleanCommand(args: string[]): Promise<void> {
 
 	const result: CleanResult = {
 		sessionEndEventsLogged: 0,
+		codexServerStopped: false,
 		tmuxKilled: 0,
 		worktreesCleaned: 0,
 		branchesDeleted: 0,
@@ -475,6 +478,16 @@ export async function cleanCommand(args: string[]): Promise<void> {
 				doctorIssues: healthCheck.doctorIssues,
 				doctorWarnings: healthCheck.doctorWarnings,
 			};
+		}
+	}
+
+	// 0.5. Stop Codex App Server (when --all) before killing tmux sessions.
+	// Gives the server a clean shutdown opportunity before processes are killed.
+	if (all) {
+		try {
+			result.codexServerStopped = await stopServer(overstoryDir);
+		} catch {
+			// Non-fatal: server may already be stopped or not present
 		}
 	}
 
@@ -543,6 +556,7 @@ export async function cleanCommand(args: string[]): Promise<void> {
 	}
 
 	const lines: string[] = [];
+	if (result.codexServerStopped) lines.push("Stopped Codex App Server");
 	if (result.sessionEndEventsLogged > 0) {
 		lines.push(
 			`Logged ${result.sessionEndEventsLogged} synthetic session-end event${result.sessionEndEventsLogged === 1 ? "" : "s"}`,

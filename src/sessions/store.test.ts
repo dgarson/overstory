@@ -42,6 +42,7 @@ function makeSession(overrides: Partial<AgentSession> = {}): AgentSession {
 		parentAgent: null,
 		depth: 0,
 		runId: null,
+		runtime: "claude",
 		startedAt: "2026-01-15T10:00:00.000Z",
 		lastActivity: "2026-01-15T10:00:00.000Z",
 		escalationLevel: 0,

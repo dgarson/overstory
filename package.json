@@ -27,10 +27,15 @@
 		"overstory": "./src/index.ts"
 	},
 	"scripts": {
-		"test": "bun test",
+		"test": "cd src && bun test",
+		"test:bridge": "bun test src/codex/bridge-integration.integration.ts",
 		"lint": "biome check .",
 		"lint:fix": "biome check --write .",
 		"typecheck": "tsc --noEmit",
+		"check": "bun run test && bun run lint && bun run typecheck",
+		"bundled-defs": "bun run scripts/gen-bundled-defs.ts",
+		"prebuild": "bun run bundled-defs",
+		"build": "bun build --compile --outfile overstory src/index.ts && bun build --compile --outfile overstory-bridge src/codex/bridge.ts",
 		"version:bump": "bun scripts/version-bump.ts"
 	},
 	"dependencies": {},

@@ -51,6 +51,15 @@ export const DEFAULT_CONFIG: OverstoryConfig = {
 		verbose: false,
 		redactSecrets: true,
 	},
+	codex: {
+		enabled: false,
+		defaultRuntime: {},
+		serverPort: 21816,
+		model: "gpt-5.3-codex",
+		compactionThreshold: 0.8,
+		maxDeltaBufferBytes: 1_048_576,
+		approvalTimeoutMs: 60_000,
+	},
 };
 
 const CONFIG_FILENAME = "config.yaml";
@@ -420,15 +429,62 @@ function validateConfig(config: OverstoryConfig): void {
 		});
 	}
 
-	// models: each value must be a valid model name
-	const validModels = ["sonnet", "opus", "haiku"];
+	// models: each value must be a non-empty string (model IDs are runtime-validated by Claude Code)
 	for (const [role, model] of Object.entries(config.models)) {
-		if (model !== undefined && !validModels.includes(model)) {
-			throw new ValidationError(`models.${role} must be one of: ${validModels.join(", ")}`, {
+		if (model !== undefined && (typeof model !== "string" || model.length === 0)) {
+			throw new ValidationError(`models.${role} must be a non-empty string`, {
 				field: `models.${role}`,
 				value: model,
 			});
 		}
+	}
+
+	// codex config validation (only when codex section is present)
+	const { codex } = config;
+	if (!codex) return;
+
+	// codex.serverPort must be an integer 1-65535
+	if (!Number.isInteger(codex.serverPort) || codex.serverPort < 1 || codex.serverPort > 65535) {
+		throw new ValidationError("codex.serverPort must be an integer between 1 and 65535", {
+			field: "codex.serverPort",
+			value: codex.serverPort,
+		});
+	}
+
+	// codex.model must be a non-empty string
+	if (typeof codex.model !== "string" || codex.model.length === 0) {
+		throw new ValidationError("codex.model must be a non-empty string", {
+			field: "codex.model",
+			value: codex.model,
+		});
+	}
+
+	// codex.compactionThreshold must be a number between 0 and 1
+	if (
+		typeof codex.compactionThreshold !== "number" ||
+		codex.compactionThreshold < 0 ||
+		codex.compactionThreshold > 1
+	) {
+		throw new ValidationError("codex.compactionThreshold must be a number between 0 and 1", {
+			field: "codex.compactionThreshold",
+			value: codex.compactionThreshold,
+		});
+	}
+
+	// codex.maxDeltaBufferBytes must be a positive integer
+	if (!Number.isInteger(codex.maxDeltaBufferBytes) || codex.maxDeltaBufferBytes < 1) {
+		throw new ValidationError("codex.maxDeltaBufferBytes must be a positive integer", {
+			field: "codex.maxDeltaBufferBytes",
+			value: codex.maxDeltaBufferBytes,
+		});
+	}
+
+	// codex.approvalTimeoutMs must be a positive integer
+	if (!Number.isInteger(codex.approvalTimeoutMs) || codex.approvalTimeoutMs < 1) {
+		throw new ValidationError("codex.approvalTimeoutMs must be a positive integer", {
+			field: "codex.approvalTimeoutMs",
+			value: codex.approvalTimeoutMs,
+		});
 	}
 }
 

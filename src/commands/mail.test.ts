@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { createEventStore } from "../events/store.ts";
 import { createMailClient } from "../mail/client.ts";
 import { createMailStore } from "../mail/store.ts";
-import type { StoredEvent } from "../types.ts";
+import type { AgentSession, StoredEvent } from "../types.ts";
 import { mailCommand } from "./mail.ts";
 
 describe("mailCommand", () => {
@@ -754,7 +754,7 @@ describe("mailCommand", () => {
 			const sessionsDbPath = join(tempDir, ".overstory", "sessions.db");
 			const sessionStore = createSessionStore(sessionsDbPath);
 
-			const sessions = [
+			const sessions: AgentSession[] = [
 				{
 					id: "session-orchestrator",
 					agentName: "orchestrator",

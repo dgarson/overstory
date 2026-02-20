@@ -12,7 +12,8 @@ export type DoctorCategory =
 	| "agents"
 	| "merge"
 	| "logs"
-	| "version";
+	| "version"
+	| "codex";
 
 /** Result of a single doctor health check. */
 export interface DoctorCheck {

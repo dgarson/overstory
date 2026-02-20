@@ -10,13 +10,29 @@
  */
 
 import { Database } from "bun:sqlite";
-import { mkdir, readdir } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { BUNDLED_AGENT_DEFS } from "../agents/bundled-defs.ts";
 import { DEFAULT_CONFIG } from "../config.ts";
 import { ValidationError } from "../errors.ts";
 import type { AgentManifest, OverstoryConfig } from "../types.ts";
 
 const OVERSTORY_DIR = ".overstory";
+
+/**
+ * Canonical list of agent definition files shipped with overstory.
+ * Exported so tests can import rather than duplicate.
+ */
+export const AGENT_DEF_FILES = [
+	"scout.md",
+	"builder.md",
+	"reviewer.md",
+	"lead.md",
+	"merger.md",
+	"supervisor.md",
+	"coordinator.md",
+	"monitor.md",
+];
 
 /**
  * Detect the project name from git or fall back to directory name.
@@ -569,14 +585,14 @@ export async function initCommand(args: string[]): Promise<void> {
 		printCreated(`${dir}/`);
 	}
 
-	// 3b. Deploy agent definition .md files from overstory install directory
-	const overstoryAgentsDir = join(import.meta.dir, "..", "..", "agents");
+	// 3b. Deploy agent definition .md files bundled with overstory.
+	// readAgentDef() uses per-file static new URL() calls so Bun's bundler
+	// embeds each file as a compile-time constant — dynamic template literals
+	// are NOT detected by the bundler and would fail in the installed binary.
 	const agentDefsTarget = join(overstoryPath, "agent-defs");
-	const agentDefFiles = await readdir(overstoryAgentsDir);
-	for (const fileName of agentDefFiles) {
-		if (!fileName.endsWith(".md")) continue;
-		const source = Bun.file(join(overstoryAgentsDir, fileName));
-		const content = await source.text();
+	for (const fileName of AGENT_DEF_FILES) {
+		const content = BUNDLED_AGENT_DEFS[fileName] ?? "";
+		if (!content) throw new Error(`Missing bundled agent def: ${fileName}`);
 		await Bun.write(join(agentDefsTarget, fileName), content);
 		printCreated(`${OVERSTORY_DIR}/agent-defs/${fileName}`);
 	}

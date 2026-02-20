@@ -394,10 +394,21 @@ models:
 		expect(config.models.builder).toBe("opus");
 	});
 
-	test("rejects invalid model name in models section", async () => {
+	test("accepts arbitrary model strings (validated at runtime by Claude Code)", async () => {
 		await writeConfig(`
 models:
-  coordinator: gpt4
+  coordinator: gpt-4o
+  builder: claude-3-7-sonnet-20250219
+`);
+		const config = await loadConfig(tempDir);
+		expect(config.models.coordinator).toBe("gpt-4o");
+		expect(config.models.builder).toBe("claude-3-7-sonnet-20250219");
+	});
+
+	test("rejects empty string model name in models section", async () => {
+		await writeConfig(`
+models:
+  coordinator: ""
 `);
 		await expect(loadConfig(tempDir)).rejects.toThrow(ValidationError);
 	});
@@ -520,6 +531,7 @@ describe("DEFAULT_CONFIG", () => {
 		expect(DEFAULT_CONFIG.watchdog).toBeDefined();
 		expect(DEFAULT_CONFIG.models).toBeDefined();
 		expect(DEFAULT_CONFIG.logging).toBeDefined();
+		expect(DEFAULT_CONFIG.codex).toBeDefined();
 	});
 
 	test("has default providers with anthropic native", () => {
@@ -535,5 +547,12 @@ describe("DEFAULT_CONFIG", () => {
 		expect(DEFAULT_CONFIG.watchdog.tier0IntervalMs).toBe(30_000);
 		expect(DEFAULT_CONFIG.watchdog.staleThresholdMs).toBe(300_000);
 		expect(DEFAULT_CONFIG.watchdog.zombieThresholdMs).toBe(600_000);
+		const codex = DEFAULT_CONFIG.codex;
+		expect(codex?.enabled).toBe(false);
+		expect(codex?.serverPort).toBe(21816);
+		expect(codex?.model).toBe("gpt-5.3-codex");
+		expect(codex?.compactionThreshold).toBe(0.8);
+		expect(codex?.maxDeltaBufferBytes).toBe(1_048_576);
+		expect(codex?.approvalTimeoutMs).toBe(60_000);
 	});
 });

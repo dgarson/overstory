@@ -305,7 +305,7 @@ describe("estimateCost", () => {
 			outputTokens: 1_000_000,
 			cacheReadTokens: 0,
 			cacheCreationTokens: 0,
-			modelUsed: "gpt-4o",
+			modelUsed: "some-unknown-vendor-model-xyz",
 		});
 
 		expect(cost).toBeNull();

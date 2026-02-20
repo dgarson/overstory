@@ -5,6 +5,9 @@
  * tmux send-keys. Used to notify agents of new mail or relay urgent
  * instructions mid-conversation.
  *
+ * For Codex agents (runtime === "codex"), sends a high-priority mail
+ * message and wakes the bridge process via SIGUSR1 instead of tmux.
+ *
  * Includes retry logic (3 attempts) and debounce (500ms) to prevent
  * rapid-fire nudges to the same agent.
  */
@@ -12,8 +15,10 @@
 import { join } from "node:path";
 import { AgentError, ValidationError } from "../errors.ts";
 import { createEventStore } from "../events/store.ts";
+import { createMailClient } from "../mail/client.ts";
+import { createMailStore } from "../mail/store.ts";
 import { openSessionStore } from "../sessions/compat.ts";
-import type { EventStore } from "../types.ts";
+import type { AgentRuntime, EventStore } from "../types.ts";
 import { isSessionAlive, sendKeys } from "../worktree/tmux.ts";
 
 const DEFAULT_MESSAGE = "Check your mail inbox for new messages.";
@@ -81,23 +86,36 @@ async function loadOrchestratorTmuxSession(projectRoot: string): Promise<string 
 	}
 }
 
+/** Resolved information about a target agent for nudge delivery. */
+interface ResolvedTarget {
+	tmuxSession: string;
+	runtime: AgentRuntime;
+	bridgePid: number | null;
+}
+
 /**
- * Resolve the tmux session name for an agent.
+ * Resolve the target session info for an agent.
  *
  * For regular agents, looks up the SessionStore.
  * For "orchestrator", falls back to the orchestrator-tmux.json registration
  * file written by `overstory prime`.
+ *
+ * Returns null if no active session is found.
  */
 async function resolveTargetSession(
 	projectRoot: string,
 	agentName: string,
-): Promise<string | null> {
+): Promise<ResolvedTarget | null> {
 	const overstoryDir = join(projectRoot, ".overstory");
 	const { store } = openSessionStore(overstoryDir);
 	try {
 		const session = store.getByName(agentName);
 		if (session && session.state !== "zombie" && session.state !== "completed") {
-			return session.tmuxSession;
+			return {
+				tmuxSession: session.tmuxSession,
+				runtime: session.runtime ?? "claude",
+				bridgePid: session.pid,
+			};
 		}
 	} finally {
 		store.close();
@@ -105,7 +123,10 @@ async function resolveTargetSession(
 
 	// Fallback for orchestrator: check orchestrator-tmux.json
 	if (agentName === "orchestrator") {
-		return await loadOrchestratorTmuxSession(projectRoot);
+		const tmuxSession = await loadOrchestratorTmuxSession(projectRoot);
+		if (tmuxSession !== null) {
+			return { tmuxSession, runtime: "claude", bridgePid: null };
+		}
 	}
 
 	return null;
@@ -232,6 +253,97 @@ function recordNudgeEvent(
 }
 
 /**
+ * Deliver a nudge to a Codex agent: send high-priority mail then wake the
+ * bridge process via SIGUSR1 so it picks up the message immediately.
+ */
+async function nudgeCodexAgent(
+	overstoryDir: string,
+	agentName: string,
+	sessionPid: number | null,
+	message: string,
+	statePath: string,
+): Promise<{ delivered: boolean; reason?: string }> {
+	// Send mail so the bridge has a message to act on.
+	const mailStore = createMailStore(join(overstoryDir, "mail.db"));
+	const mailClient = createMailClient(mailStore);
+	try {
+		mailClient.send({
+			from: "orchestrator",
+			to: agentName,
+			subject: "nudge",
+			body: message,
+			type: "status",
+			priority: "high",
+		});
+	} finally {
+		mailClient.close();
+	}
+
+	// Resolve the bridge PID. The bridge writes its actual bun process PID to
+	// agents/<name>/bridge.pid at startup; prefer that over the session PID
+	// since the tmux pane's #{pane_pid} may be a shell wrapper.
+	let bridgePid = sessionPid;
+	try {
+		const pidFile = Bun.file(join(overstoryDir, "agents", agentName, "bridge.pid"));
+		if (await pidFile.exists()) {
+			const pidFromFile = Number.parseInt((await pidFile.text()).trim(), 10);
+			if (!Number.isNaN(pidFromFile)) {
+				bridgePid = pidFromFile;
+			}
+		}
+	} catch {
+		// Fall back to session PID
+	}
+
+	// Validate the PID is still alive before signalling (C1: stale bridge PID).
+	// kill(pid, 0) checks existence without delivering a signal; it throws
+	// ESRCH if the PID doesn't exist, preventing us from hitting an unrelated
+	// process that reused the slot.
+	if (bridgePid !== null) {
+		try {
+			process.kill(bridgePid, 0);
+		} catch {
+			// Stale — fall back to session PID if it differs
+			bridgePid = sessionPid !== null && sessionPid !== bridgePid ? sessionPid : null;
+		}
+	}
+
+	if (bridgePid !== null) {
+		try {
+			process.kill(bridgePid, "SIGUSR1");
+		} catch {
+			// Bridge process may have already exited — not fatal
+		}
+	}
+
+	await recordNudge(statePath, agentName);
+	return { delivered: true };
+}
+
+/**
+ * Deliver a nudge to a Claude Code agent via tmux send-keys.
+ */
+async function nudgeClaudeAgent(
+	tmuxSession: string,
+	agentName: string,
+	message: string,
+	statePath: string,
+): Promise<{ delivered: boolean; reason?: string }> {
+	const alive = await isSessionAlive(tmuxSession);
+	if (!alive) {
+		return { delivered: false, reason: `Tmux session "${tmuxSession}" is not alive` };
+	}
+
+	const delivered = await sendNudgeWithRetry(tmuxSession, message);
+	if (!delivered) {
+		return { delivered: false, reason: `Failed to send after ${MAX_RETRIES} attempts` };
+	}
+
+	await recordNudge(statePath, agentName);
+	return { delivered: true };
+}
+
+/**
  * Core nudge function. Exported for use by mail send auto-nudge.
  *
  * @param projectRoot - Absolute path to the project root
@@ -246,53 +358,25 @@ export async function nudgeAgent(
 	message: string = DEFAULT_MESSAGE,
 	force = false,
 ): Promise<{ delivered: boolean; reason?: string }> {
-	let result: { delivered: boolean; reason?: string };
+	const overstoryDir = join(projectRoot, ".overstory");
+	const statePath = join(overstoryDir, "nudge-state.json");
 
-	// Resolve tmux session (SessionStore for agents, orchestrator-tmux.json for orchestrator)
-	const tmuxSessionName = await resolveTargetSession(projectRoot, agentName);
-
-	if (!tmuxSessionName) {
-		result = { delivered: false, reason: `No active session for agent "${agentName}"` };
-	} else {
-		// Check debounce (unless forced)
-		let debounced = false;
-		if (!force) {
-			const statePath = join(projectRoot, ".overstory", "nudge-state.json");
-			debounced = await isDebounced(statePath, agentName);
-		}
-
-		if (debounced) {
-			result = { delivered: false, reason: "Debounced: nudge sent too recently" };
-		} else {
-			// Verify tmux session is alive
-			const alive = await isSessionAlive(tmuxSessionName);
-			if (!alive) {
-				result = {
-					delivered: false,
-					reason: `Tmux session "${tmuxSessionName}" is not alive`,
-				};
-			} else {
-				// Send with retry
-				const delivered = await sendNudgeWithRetry(tmuxSessionName, message);
-
-				if (delivered) {
-					// Record nudge for debounce tracking
-					const statePath = join(projectRoot, ".overstory", "nudge-state.json");
-					await recordNudge(statePath, agentName);
-					result = { delivered: true };
-				} else {
-					result = {
-						delivered: false,
-						reason: `Failed to send after ${MAX_RETRIES} attempts`,
-					};
-				}
-			}
-		}
+	const target = await resolveTargetSession(projectRoot, agentName);
+	if (!target) {
+		return { delivered: false, reason: `No active session for agent "${agentName}"` };
 	}
+
+	if (!force && (await isDebounced(statePath, agentName))) {
+		return { delivered: false, reason: "Debounced: nudge sent too recently" };
+	}
+
+	const result =
+		target.runtime === "codex"
+			? await nudgeCodexAgent(overstoryDir, agentName, target.bridgePid, message, statePath)
+			: await nudgeClaudeAgent(target.tmuxSession, agentName, message, statePath);
 
 	// Record event to EventStore (fire-and-forget)
 	try {
-		const overstoryDir = join(projectRoot, ".overstory");
 		const eventsDbPath = join(overstoryDir, "events.db");
 		const eventStore = createEventStore(eventsDbPath);
 		try {

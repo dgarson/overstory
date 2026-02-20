@@ -279,13 +279,13 @@ describe("createManifestLoader", () => {
 			await expect(loader.load()).rejects.toThrow("agents");
 		});
 
-		test("throws AgentError for invalid model value", async () => {
+		test("throws AgentError for empty model string", async () => {
 			const data = {
 				version: "1.0",
 				agents: {
 					bad: {
 						file: "bad.md",
-						model: "gpt-4",
+						model: "",
 						tools: ["Read"],
 						capabilities: ["test"],
 						canSpawn: false,
@@ -431,7 +431,7 @@ describe("createManifestLoader", () => {
 				agents: {
 					bad: {
 						file: "",
-						model: "invalid",
+						model: "",
 						tools: "not-array",
 						capabilities: "not-array",
 						canSpawn: "not-bool",
@@ -458,8 +458,8 @@ describe("createManifestLoader", () => {
 		});
 	});
 
-	describe("agent with all valid models", () => {
-		for (const model of ["sonnet", "opus", "haiku"] as const) {
+	describe("agent with valid model strings", () => {
+		for (const model of ["sonnet", "opus", "haiku", "gpt-4o", "claude-3-7-sonnet-20250219"]) {
 			test(`accepts model "${model}"`, async () => {
 				const data = {
 					version: "1.0",
