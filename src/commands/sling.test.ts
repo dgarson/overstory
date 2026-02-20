@@ -4,6 +4,7 @@ import {
 	type BeaconOptions,
 	buildBeacon,
 	calculateStaggerDelay,
+	isRunningAsRoot,
 	parentHasScouts,
 	validateHierarchy,
 } from "./sling.ts";
@@ -429,5 +430,19 @@ describe("buildBeacon", () => {
 		expect(beacon).toContain("[OVERSTORY] worker-3 (builder)");
 		expect(beacon).toContain("task:overstory-deep");
 		expect(beacon).toContain("Depth: 2 | Parent: lead-main");
+	});
+});
+
+describe("isRunningAsRoot", () => {
+	test("returns true when getuid returns 0", () => {
+		expect(isRunningAsRoot(() => 0)).toBe(true);
+	});
+
+	test("returns false when getuid returns non-zero UID", () => {
+		expect(isRunningAsRoot(() => 1000)).toBe(false);
+	});
+
+	test("returns false when getuid is undefined (platform without getuid)", () => {
+		expect(isRunningAsRoot(undefined)).toBe(false);
 	});
 });

@@ -51,6 +51,9 @@ describe("checkLogs", () => {
 				aiResolveEnabled: false,
 				reimagineEnabled: false,
 			},
+			providers: {
+				anthropic: { type: "native" },
+			},
 			watchdog: {
 				tier0Enabled: true,
 				tier0IntervalMs: 30000,

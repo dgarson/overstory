@@ -65,6 +65,17 @@ export function calculateStaggerDelay(
 }
 
 /**
+ * Check if the current process is running as root (UID 0).
+ * Returns true if running as root, false otherwise.
+ * Returns false on platforms that don't support getuid (e.g., Windows).
+ *
+ * The getuid parameter is injectable for testability without mocking process.getuid.
+ */
+export function isRunningAsRoot(getuid: (() => number) | undefined = process.getuid): boolean {
+	return getuid?.() === 0;
+}
+
+/**
  * Parse a named flag value from an args array.
  */
 function getFlag(args: string[], flag: string): string | undefined {
@@ -219,6 +230,13 @@ export async function slingCommand(args: string[]): Promise<void> {
 			field: "depth",
 			value: depthStr,
 		});
+	}
+
+	if (isRunningAsRoot()) {
+		throw new AgentError(
+			"Cannot spawn agents as root (UID 0). The claude CLI rejects --dangerously-skip-permissions when run as root, causing the tmux session to die immediately. Run overstory as a non-root user.",
+			{ agentName: name },
+		);
 	}
 
 	// Validate that spec file exists if provided, and resolve to absolute path

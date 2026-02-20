@@ -429,7 +429,27 @@ export async function sendKeys(name: string, keys: string): Promise<void> {
 	]);
 
 	if (exitCode !== 0) {
-		throw new AgentError(`Failed to send keys to tmux session "${name}": ${stderr.trim()}`, {
+		const trimmedStderr = stderr.trim();
+
+		if (trimmedStderr.includes("no server running")) {
+			throw new AgentError(
+				`Tmux server is not running (cannot reach session "${name}"). This often happens when running as root (UID 0) or when tmux crashed. Original error: ${trimmedStderr}`,
+				{ agentName: name },
+			);
+		}
+
+		if (
+			trimmedStderr.includes("session not found") ||
+			trimmedStderr.includes("can't find session") ||
+			trimmedStderr.includes("cant find session")
+		) {
+			throw new AgentError(
+				`Tmux session "${name}" does not exist. The agent may have crashed or been killed before receiving input.`,
+				{ agentName: name },
+			);
+		}
+
+		throw new AgentError(`Failed to send keys to tmux session "${name}": ${trimmedStderr}`, {
 			agentName: name,
 		});
 	}

@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-02-19
+
+### Added
+
+#### Provider Types
+- `ModelAlias`, `ModelRef`, and `ProviderConfig` types in `types.ts` — foundation for multi-provider model routing (`native` and `gateway` provider types with `baseUrl` and `authTokenEnv` configuration)
+- `providers` field in `OverstoryConfig` — `Record<string, ProviderConfig>` for configuring model providers per project
+- `resolveModel()` signature updated to accept `ModelRef` (provider-qualified strings like `openrouter/openai/gpt-5.3`) alongside simple `ModelAlias` values
+
+#### Costs Command
+- `--self` flag for `overstory costs` — parse the current orchestrator session's Claude Code transcript directly, bypassing metrics.db, useful for real-time cost visibility without agent infrastructure
+
+#### Metrics
+- `run_id` column added to `metrics.db` sessions table — enables `overstory costs --run <id>` filtering to work correctly; includes automatic migration for existing databases
+
+#### Watchdog
+- Phase-aware `buildCompletionMessage()` in watchdog daemon — generates targeted completion nudge messages based on worker capability composition (single-capability batches get phase-specific messages like "Ready for next phase", mixed batches get a summary with breakdown)
+
+#### Testing
+- Test suite grew from 1892 to 1916 tests across 73 files (4866 expect() calls)
+
+## [0.5.6] - 2026-02-18
+
+### Added
+
+#### Safety Guards
+- Root-user pre-flight guard on all agent spawn commands (`sling`, `coordinator start`, `supervisor start`, `monitor start`) — blocks spawning when running as UID 0, since the `claude` CLI rejects `--dangerously-skip-permissions` as root causing tmux sessions to die immediately
+- Unmerged branch safety check in `overstory worktree clean` — skips worktrees with unmerged branches by default, warns about skipped branches, and requires `--force` to delete them
+
+#### Init Improvements
+- `.overstory/README.md` generation during `overstory init` — explains the directory to contributors who encounter `.overstory/` in a project, whitelisted in `.gitignore`
+
+#### Tier 2 Monitor Config Gating
+- `overstory monitor start` now gates on `watchdog.tier2Enabled` config flag — throws a clear error when Tier 2 is disabled instead of silently proceeding
+- `overstory coordinator start --monitor` respects `tier2Enabled` — skips monitor auto-start with a message when disabled
+
+#### Tmux Error Handling
+- `sendKeys` now distinguishes "tmux server not running" from "session not found" — provides actionable error messages for each case (e.g., root-user hint for server-not-running)
+
+#### Documentation
+- Lead agent definition (`agents/lead.md`) reframed as coordinator-not-doer — emphasizes the lead's role as a delegation specialist rather than an implementer
+
+#### Testing
+- Test suite grew from 1868 to 1892 tests across 73 files (4807 expect() calls)
+
+### Fixed
+- Biome formatting in merged builder code
+
 ## [0.5.5] - 2026-02-18
 
 ### Added
@@ -362,7 +410,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Biome configuration for formatting and linting
 - TypeScript strict mode with `noUncheckedIndexedAccess`
 
-[Unreleased]: https://github.com/jayminwest/overstory/compare/v0.5.5...HEAD
+[Unreleased]: https://github.com/jayminwest/overstory/compare/v0.5.7...HEAD
+[0.5.7]: https://github.com/jayminwest/overstory/compare/v0.5.6...v0.5.7
+[0.5.6]: https://github.com/jayminwest/overstory/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/jayminwest/overstory/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/jayminwest/overstory/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/jayminwest/overstory/compare/v0.5.2...v0.5.3

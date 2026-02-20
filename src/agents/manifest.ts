@@ -273,8 +273,6 @@ export function createManifestLoader(manifestPath: string, agentBaseDir: string)
 	};
 }
 
-type ModelName = "sonnet" | "opus" | "haiku";
-
 /**
  * Resolve the model for an agent role.
  *
@@ -284,8 +282,8 @@ export function resolveModel(
 	config: OverstoryConfig,
 	manifest: AgentManifest,
 	role: string,
-	fallback: ModelName,
-): ModelName {
+	fallback: string,
+): string {
 	const configModel = config.models[role];
 	if (configModel) return configModel;
 	const manifestModel = manifest.agents[role]?.model;

@@ -24,6 +24,7 @@ import { createRunStore } from "../sessions/store.ts";
 import type { AgentSession } from "../types.ts";
 import { isProcessRunning } from "../watchdog/health.ts";
 import { createSession, isSessionAlive, killSession, sendKeys } from "../worktree/tmux.ts";
+import { isRunningAsRoot } from "./sling.ts";
 
 /** Default coordinator agent name. */
 const COORDINATOR_NAME = "coordinator";
@@ -265,6 +266,13 @@ async function startCoordinator(args: string[], deps: CoordinatorDeps = {}): Pro
 	const shouldAttach = resolveAttach(args, !!process.stdout.isTTY);
 	const watchdogFlag = args.includes("--watchdog");
 	const monitorFlag = args.includes("--monitor");
+
+	if (isRunningAsRoot()) {
+		throw new AgentError(
+			"Cannot spawn agents as root (UID 0). The claude CLI rejects --dangerously-skip-permissions when run as root, causing the tmux session to die immediately. Run overstory as a non-root user.",
+		);
+	}
+
 	const cwd = process.cwd();
 	const config = await loadConfig(cwd);
 	const projectRoot = config.project.root;
@@ -389,15 +397,20 @@ async function startCoordinator(args: string[], deps: CoordinatorDeps = {}): Pro
 			}
 		}
 
-		// Auto-start monitor if --monitor flag is present
+		// Auto-start monitor if --monitor flag is present and tier2 is enabled
 		let monitorPid: number | undefined;
 		if (monitorFlag) {
-			const monitorResult = await monitor.start([]);
-			if (monitorResult) {
-				monitorPid = monitorResult.pid;
-				if (!json) process.stdout.write(`  Monitor:  started (PID ${monitorResult.pid})\n`);
+			if (!config.watchdog.tier2Enabled) {
+				if (!json)
+					process.stderr.write("  Monitor:  skipped (watchdog.tier2Enabled is false in config)\n");
 			} else {
-				if (!json) process.stderr.write("  Monitor:  failed to start or already running\n");
+				const monitorResult = await monitor.start([]);
+				if (monitorResult) {
+					monitorPid = monitorResult.pid;
+					if (!json) process.stdout.write(`  Monitor:  started (PID ${monitorResult.pid})\n`);
+				} else {
+					if (!json) process.stderr.write("  Monitor:  failed to start or already running\n");
+				}
 			}
 		}
 

@@ -853,4 +853,25 @@ describe("sendKeys", () => {
 		const cmd = callArgs[0] as string[];
 		expect(cmd).toEqual(["tmux", "send-keys", "-t", "overstory-agent", "", "Enter"]);
 	});
+
+	test("throws descriptive error when tmux server is not running", async () => {
+		spawnSpy.mockImplementation(() =>
+			mockSpawnResult("", "no server running on /tmp/tmux-0/default\n", 1),
+		);
+		await expect(sendKeys("overstory-agent-fake", "hello")).rejects.toThrow(
+			/Tmux server is not running/,
+		);
+	});
+
+	test("throws descriptive error when session not found", async () => {
+		spawnSpy.mockImplementation(() =>
+			mockSpawnResult("", "cant find session: overstory-agent-fake\n", 1),
+		);
+		await expect(sendKeys("overstory-agent-fake", "hello")).rejects.toThrow(/does not exist/);
+	});
+
+	test("throws generic error for other failures", async () => {
+		spawnSpy.mockImplementation(() => mockSpawnResult("", "some other error\n", 1));
+		await expect(sendKeys("overstory-agent-fake", "hello")).rejects.toThrow(/Failed to send keys/);
+	});
 });
