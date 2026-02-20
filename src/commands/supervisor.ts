@@ -23,6 +23,7 @@ import { AgentError, ValidationError } from "../errors.ts";
 import { openSessionStore } from "../sessions/compat.ts";
 import type { AgentSession } from "../types.ts";
 import { createSession, isSessionAlive, killSession, sendKeys } from "../worktree/tmux.ts";
+import { isRunningAsRoot } from "./sling.ts";
 
 /**
  * Build the supervisor startup beacon.
@@ -126,6 +127,12 @@ async function startSupervisor(args: string[]): Promise<void> {
 			field: "name",
 			value: flags.name ?? "",
 		});
+	}
+
+	if (isRunningAsRoot()) {
+		throw new AgentError(
+			"Cannot spawn agents as root (UID 0). The claude CLI rejects --dangerously-skip-permissions when run as root, causing the tmux session to die immediately. Run overstory as a non-root user.",
+		);
 	}
 
 	const cwd = process.cwd();

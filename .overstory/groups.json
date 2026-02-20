@@ -173,5 +173,32 @@
 		"status": "completed",
 		"createdAt": "2026-02-18T15:14:35.484Z",
 		"completedAt": "2026-02-18T15:57:31.236Z"
+	},
+	{
+		"id": "group-e4629264",
+		"name": "backlog-priority-sweep",
+		"memberIssueIds": [
+			"overstory-6j2o",
+			"overstory-zq15",
+			"overstory-2bix",
+			"overstory-so0b",
+			"overstory-2ki1"
+		],
+		"status": "completed",
+		"createdAt": "2026-02-19T00:31:06.559Z",
+		"completedAt": "2026-02-19T01:09:07.132Z"
+	},
+	{
+		"id": "group-06092dc7",
+		"name": "p1p2-sweep",
+		"memberIssueIds": [
+			"overstory-yg84",
+			"overstory-rgst",
+			"overstory-4szs",
+			"overstory-1ilu"
+		],
+		"status": "completed",
+		"createdAt": "2026-02-19T20:21:09.590Z",
+		"completedAt": "2026-02-19T21:06:25.825Z"
 	}
 ]

@@ -3,7 +3,7 @@ import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { BUNDLED_AGENT_DEFS } from "../agents/bundled-defs.ts";
 import { cleanupTempDir, createTempGitRepo } from "../test-helpers.ts";
-import { AGENT_DEF_FILES, initCommand, OVERSTORY_GITIGNORE } from "./init.ts";
+import { AGENT_DEF_FILES, initCommand, OVERSTORY_GITIGNORE, OVERSTORY_README } from "./init.ts";
 
 /**
  * Tests for `overstory init` -- agent definition deployment.
@@ -187,6 +187,81 @@ describe("initCommand: .overstory/.gitignore", () => {
 
 		// Verify the file was NOT overwritten (early return prevented it)
 		const afterSecondInit = await Bun.file(gitignorePath).text();
+		expect(afterSecondInit).toBe("# custom content\n");
+	});
+});
+
+describe("initCommand: .overstory/README.md", () => {
+	let tempDir: string;
+	let originalCwd: string;
+	let originalWrite: typeof process.stdout.write;
+
+	beforeEach(async () => {
+		tempDir = await createTempGitRepo();
+		originalCwd = process.cwd();
+		process.chdir(tempDir);
+
+		// Suppress stdout noise from initCommand
+		originalWrite = process.stdout.write;
+		process.stdout.write = (() => true) as typeof process.stdout.write;
+	});
+
+	afterEach(async () => {
+		process.chdir(originalCwd);
+		process.stdout.write = originalWrite;
+		await cleanupTempDir(tempDir);
+	});
+
+	test("creates .overstory/README.md with expected content", async () => {
+		await initCommand([]);
+
+		const readmePath = join(tempDir, ".overstory", "README.md");
+		const exists = await Bun.file(readmePath).exists();
+		expect(exists).toBe(true);
+
+		const content = await Bun.file(readmePath).text();
+		expect(content).toBe(OVERSTORY_README);
+	});
+
+	test("README.md is whitelisted in gitignore", () => {
+		expect(OVERSTORY_GITIGNORE).toContain("!README.md\n");
+	});
+
+	test("--force reinit overwrites README.md", async () => {
+		// First init
+		await initCommand([]);
+
+		const readmePath = join(tempDir, ".overstory", "README.md");
+
+		// Tamper with the README
+		await Bun.write(readmePath, "# tampered\n");
+		const tampered = await Bun.file(readmePath).text();
+		expect(tampered).toBe("# tampered\n");
+
+		// Reinit with --force
+		await initCommand(["--force"]);
+
+		// Verify restored to canonical content
+		const restored = await Bun.file(readmePath).text();
+		expect(restored).toBe(OVERSTORY_README);
+	});
+
+	test("subsequent init without --force does not overwrite README.md", async () => {
+		// First init
+		await initCommand([]);
+
+		const readmePath = join(tempDir, ".overstory", "README.md");
+
+		// Tamper with the README
+		await Bun.write(readmePath, "# custom content\n");
+		const tampered = await Bun.file(readmePath).text();
+		expect(tampered).toBe("# custom content\n");
+
+		// Second init without --force returns early
+		await initCommand([]);
+
+		// Verify tampered content preserved (early return)
+		const afterSecondInit = await Bun.file(readmePath).text();
 		expect(afterSecondInit).toBe("# custom content\n");
 	});
 });
