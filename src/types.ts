@@ -62,6 +62,7 @@ export interface OverstoryConfig {
 		redactSecrets: boolean;
 	};
 	codex?: CodexConfig;
+	control: ControlConfig;
 }
 
 export interface CodexConfig {
@@ -79,6 +80,21 @@ export interface CodexConfig {
 	maxDeltaBufferBytes: number;
 	/** Approval escalation timeout in ms */
 	approvalTimeoutMs: number;
+}
+
+export interface ControlConfig {
+	/** Enable the coordinator-managed control daemon. */
+	enabled: boolean;
+	/** Loopback HTTP port for the per-project control daemon. */
+	port: number;
+	/** Coordinator loop sweep interval. */
+	loopIntervalMs: number;
+	/** Minimum no-tool-activity window before tmux nudges are considered safe. */
+	idleThresholdMs: number;
+	/** Lease timeout used by await_work/drain queue semantics. */
+	leaseMs: number;
+	/** Minimum interval between daemon-driven nudges per agent. */
+	nudgeCooldownMs: number;
 }
 
 // === Agent Manifest ===
@@ -119,6 +135,8 @@ export type AgentState = "booting" | "working" | "completed" | "stalled" | "zomb
 
 /** Execution runtime for an agent */
 export type AgentRuntime = "claude" | "codex";
+/** Driver identity powering a session/runtime transport. */
+export type AgentDriverKind = "claude-hooks" | "codex-bridge";
 
 export interface AgentSession {
 	id: string; // Unique session ID
@@ -138,6 +156,7 @@ export interface AgentSession {
 	escalationLevel: number; // Progressive nudge stage: 0=warn, 1=nudge, 2=escalate, 3=terminate
 	stalledSince: string | null; // ISO timestamp when agent first entered stalled state
 	runtime?: AgentRuntime; // Which execution backend powers this agent (default: "claude")
+	driverKind?: AgentDriverKind; // Runtime transport implementation (default derived from runtime)
 }
 
 // === Agent Identity ===

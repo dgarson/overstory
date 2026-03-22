@@ -8,6 +8,7 @@
 
 import { Database } from "bun:sqlite";
 import type {
+	AgentDriverKind,
 	AgentRuntime,
 	AgentSession,
 	AgentState,
@@ -61,6 +62,7 @@ interface SessionRow {
 	escalation_level: number;
 	stalled_since: string | null;
 	runtime: string | null;
+	driver_kind: string | null;
 }
 
 /** Row shape for runs table as stored in SQLite (snake_case columns). */
@@ -92,7 +94,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   last_activity TEXT NOT NULL,
   escalation_level INTEGER NOT NULL DEFAULT 0,
   stalled_since TEXT,
-  runtime TEXT DEFAULT 'claude'
+  runtime TEXT DEFAULT 'claude',
+  driver_kind TEXT
 )`;
 
 const CREATE_INDEXES = `
@@ -133,6 +136,11 @@ function rowToSession(row: SessionRow): AgentSession {
 		escalationLevel: row.escalation_level,
 		stalledSince: row.stalled_since,
 		runtime: (row.runtime as AgentRuntime) ?? "claude",
+		driverKind:
+			(row.driver_kind as AgentDriverKind | null) ??
+			(((row.runtime as AgentRuntime | null) ?? "claude") === "codex"
+				? "codex-bridge"
+				: "claude-hooks"),
 	};
 }
 
@@ -154,6 +162,10 @@ function migrateRuntimeColumn(db: Database): void {
 	const hasRuntime = columns.some((c) => c.name === "runtime");
 	if (!hasRuntime) {
 		db.exec("ALTER TABLE sessions ADD COLUMN runtime TEXT DEFAULT 'claude'");
+	}
+	const hasDriverKind = columns.some((c) => c.name === "driver_kind");
+	if (!hasDriverKind) {
+		db.exec("ALTER TABLE sessions ADD COLUMN driver_kind TEXT");
 	}
 }
 
@@ -199,16 +211,17 @@ export function createSessionStore(dbPath: string): SessionStore {
 			$escalation_level: number;
 			$stalled_since: string | null;
 			$runtime: string;
+			$driver_kind: string | null;
 		}
 	>(`
 		INSERT INTO sessions
 			(id, agent_name, capability, worktree_path, branch_name, bead_id,
 			 tmux_session, state, pid, parent_agent, depth, run_id,
-			 started_at, last_activity, escalation_level, stalled_since, runtime)
+			 started_at, last_activity, escalation_level, stalled_since, runtime, driver_kind)
 		VALUES
 			($id, $agent_name, $capability, $worktree_path, $branch_name, $bead_id,
 			 $tmux_session, $state, $pid, $parent_agent, $depth, $run_id,
-			 $started_at, $last_activity, $escalation_level, $stalled_since, $runtime)
+			 $started_at, $last_activity, $escalation_level, $stalled_since, $runtime, $driver_kind)
 		ON CONFLICT(agent_name) DO UPDATE SET
 			id = excluded.id,
 			capability = excluded.capability,
@@ -225,7 +238,8 @@ export function createSessionStore(dbPath: string): SessionStore {
 			last_activity = excluded.last_activity,
 			escalation_level = excluded.escalation_level,
 			stalled_since = excluded.stalled_since,
-			runtime = excluded.runtime
+			runtime = excluded.runtime,
+			driver_kind = excluded.driver_kind
 	`);
 
 	const getByNameStmt = db.prepare<SessionRow, { $agent_name: string }>(`
@@ -290,6 +304,9 @@ export function createSessionStore(dbPath: string): SessionStore {
 				$escalation_level: session.escalationLevel,
 				$stalled_since: session.stalledSince,
 				$runtime: session.runtime ?? "claude",
+				$driver_kind:
+					session.driverKind ??
+					((session.runtime ?? "claude") === "codex" ? "codex-bridge" : "claude-hooks"),
 			});
 		},
 

@@ -6,6 +6,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { loadCheckpoint, saveCheckpoint } from "../agents/checkpoint";
 import { loadIdentity, updateIdentity } from "../agents/identity";
+import { createControlClient } from "../control/client";
 import { createEventStore } from "../events/store";
 import { createMailClient } from "../mail/client";
 import { createMailStore } from "../mail/store";
@@ -470,6 +471,7 @@ async function runBridgeSession(
 	overstoryDir: string,
 	eventStore: EventStore,
 	mailClient: ReturnType<typeof createMailClient>,
+	controlClient: ReturnType<typeof createControlClient>,
 	modifiedFiles: Set<string>,
 	refs: BridgeSessionRefs,
 	isReconnect: boolean,
@@ -756,6 +758,7 @@ async function runBridgeSession(
 			if (!itemId || !itemType) return;
 
 			itemStartTimes.set(itemId, Date.now());
+			void controlClient.toolLifecycle(config.agentName, "enter");
 			deltaManager.start(
 				itemId,
 				itemType as ItemStartedParams["itemType"],
@@ -824,6 +827,7 @@ async function runBridgeSession(
 
 			const startTime = itemStartTimes.get(itemId);
 			itemStartTimes.delete(itemId);
+			void controlClient.toolLifecycle(config.agentName, "exit");
 			const durationMs = startTime !== undefined ? Date.now() - startTime : null;
 
 			const deltaOutput = deltaManager.flush(itemId);
@@ -1058,9 +1062,24 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 	const eventStore = createEventStore(join(overstoryDir, "events.db"));
 	const mailStore = createMailStore(join(overstoryDir, "mail.db"));
 	const mailClient = createMailClient(mailStore);
+	const controlClient = createControlClient(overstoryDir);
 
 	const modifiedFiles = new Set<string>();
 	const refs: BridgeSessionRefs = { rpc: null, threadId: null, activeTurnId: null };
+
+	// Best-effort control-plane registration for safe nudging/activity tracking.
+	void controlClient.registerAgent({
+		agentName: config.agentName,
+		sessionId: config.sessionId,
+		runtime: "codex",
+		driverKind: "codex-bridge",
+		tmuxSession: null,
+		pid: process.pid,
+	});
+
+	const heartbeatInterval = setInterval(() => {
+		void controlClient.heartbeat(config.agentName);
+	}, 10_000);
 
 	// Write PID file so nudge can find the bridge process directly
 	const pidFilePath = join(overstoryDir, "agents", config.agentName, "bridge.pid");
@@ -1125,6 +1144,7 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 			overstoryDir,
 			eventStore,
 			mailClient,
+			controlClient,
 			modifiedFiles,
 			refs,
 			reconnectAttempt > 0,
@@ -1169,6 +1189,8 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 	});
 
 	// Close connections
+	clearInterval(heartbeatInterval);
+	void controlClient.markOffline(config.agentName);
 	eventStore.close();
 	mailClient.close();
 }

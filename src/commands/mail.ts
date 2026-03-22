@@ -8,6 +8,7 @@
 
 import { join } from "node:path";
 import { resolveProjectRoot } from "../config.ts";
+import { createControlClient } from "../control/client.ts";
 import { MailError, ValidationError } from "../errors.ts";
 import { createEventStore } from "../events/store.ts";
 import { isGroupAddress, resolveGroupAddress } from "../mail/broadcast.ts";
@@ -257,6 +258,7 @@ function openClient(cwd: string) {
 
 /** overstory mail send */
 async function handleSend(args: string[], cwd: string): Promise<void> {
+	const controlClient = createControlClient(join(cwd, ".overstory"));
 	const to = getFlag(args, "--to");
 	const subject = getFlag(args, "--subject");
 	const body = getFlag(args, "--body");
@@ -370,6 +372,20 @@ async function handleSend(args: string[], cwd: string): Promise<void> {
 						priority === "urgent" || priority === "high" || AUTO_NUDGE_TYPES.has(type);
 					if (shouldNudge) {
 						const nudgeReason = AUTO_NUDGE_TYPES.has(type) ? type : `${priority} priority`;
+						try {
+							await controlClient.enqueue({
+								messageId: id,
+								toAgent: recipient,
+								fromAgent: from,
+								kind: type,
+								subject,
+								body,
+								priority,
+								payload: payload ?? null,
+							});
+						} catch {
+							// Non-fatal: fallback marker path below remains active
+						}
 						await writePendingNudge(cwd, recipient, {
 							from,
 							reason: nudgeReason,
@@ -457,6 +473,20 @@ async function handleSend(args: string[], cwd: string): Promise<void> {
 		const shouldNudge = priority === "urgent" || priority === "high" || AUTO_NUDGE_TYPES.has(type);
 		if (shouldNudge) {
 			const nudgeReason = AUTO_NUDGE_TYPES.has(type) ? type : `${priority} priority`;
+			try {
+				await controlClient.enqueue({
+					messageId: id,
+					toAgent: to,
+					fromAgent: from,
+					kind: type,
+					subject,
+					body,
+					priority,
+					payload: payload ?? null,
+				});
+			} catch {
+				// Non-fatal: fallback marker path below remains active
+			}
 			await writePendingNudge(cwd, to, {
 				from,
 				reason: nudgeReason,

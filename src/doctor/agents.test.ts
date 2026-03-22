@@ -67,6 +67,14 @@ describe("checkAgents", () => {
 				verbose: false,
 				redactSecrets: true,
 			},
+			control: {
+				enabled: true,
+				port: 21827,
+				loopIntervalMs: 5000,
+				idleThresholdMs: 3000,
+				leaseMs: 60000,
+				nudgeCooldownMs: 8000,
+			},
 		};
 	});
 

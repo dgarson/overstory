@@ -19,6 +19,7 @@ import { createIdentity, loadIdentity } from "../agents/identity.ts";
 import { createManifestLoader, resolveModel } from "../agents/manifest.ts";
 import { createBeadsClient } from "../beads/client.ts";
 import { loadConfig } from "../config.ts";
+import { createControlClient, ensureControlServer } from "../control/client.ts";
 import { AgentError, ValidationError } from "../errors.ts";
 import { openSessionStore } from "../sessions/compat.ts";
 import type { AgentSession } from "../types.ts";
@@ -151,6 +152,10 @@ async function startSupervisor(args: string[]): Promise<void> {
 
 	// Check for existing supervisor with same name
 	const overstoryDir = join(projectRoot, ".overstory");
+	if (config.control.enabled) {
+		await ensureControlServer(projectRoot, overstoryDir, config.control);
+	}
+	const controlClient = createControlClient(overstoryDir);
 	const { store } = openSessionStore(overstoryDir);
 	try {
 		const existing = store.getByName(flags.name);
@@ -246,9 +251,20 @@ async function startSupervisor(args: string[]): Promise<void> {
 			escalationLevel: 0,
 			stalledSince: null,
 			runtime: "claude",
+			driverKind: "claude-hooks",
 		};
 
 		store.upsert(session);
+		if (config.control.enabled) {
+			await controlClient.registerAgent({
+				agentName: flags.name,
+				sessionId: session.id,
+				runtime: "claude",
+				driverKind: "claude-hooks",
+				tmuxSession,
+				pid,
+			});
+		}
 
 		const output = {
 			agentName: flags.name,
@@ -299,6 +315,7 @@ async function stopSupervisor(args: string[]): Promise<void> {
 	const projectRoot = config.project.root;
 
 	const overstoryDir = join(projectRoot, ".overstory");
+	const controlClient = createControlClient(overstoryDir);
 	const { store } = openSessionStore(overstoryDir);
 	try {
 		const session = store.getByName(flags.name);
@@ -323,6 +340,9 @@ async function stopSupervisor(args: string[]): Promise<void> {
 		// Update session state
 		store.updateState(flags.name, "completed");
 		store.updateLastActivity(flags.name);
+		if (config.control.enabled) {
+			await controlClient.markOffline(flags.name);
+		}
 
 		if (flags.json) {
 			process.stdout.write(`${JSON.stringify({ stopped: true, sessionId: session.id })}\n`);

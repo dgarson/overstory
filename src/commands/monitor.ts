@@ -19,6 +19,7 @@ import { deployHooks } from "../agents/hooks-deployer.ts";
 import { createIdentity, loadIdentity } from "../agents/identity.ts";
 import { createManifestLoader, resolveModel } from "../agents/manifest.ts";
 import { loadConfig } from "../config.ts";
+import { createControlClient, ensureControlServer } from "../control/client.ts";
 import { AgentError, ValidationError } from "../errors.ts";
 import { openSessionStore } from "../sessions/compat.ts";
 import type { AgentSession } from "../types.ts";
@@ -96,6 +97,10 @@ async function startMonitor(args: string[]): Promise<void> {
 
 	// Check for existing monitor
 	const overstoryDir = join(projectRoot, ".overstory");
+	if (config.control.enabled) {
+		await ensureControlServer(projectRoot, overstoryDir, config.control);
+	}
+	const controlClient = createControlClient(overstoryDir);
 	const { store } = openSessionStore(overstoryDir);
 	try {
 		const existing = store.getByName(MONITOR_NAME);
@@ -178,9 +183,21 @@ async function startMonitor(args: string[]): Promise<void> {
 			lastActivity: new Date().toISOString(),
 			escalationLevel: 0,
 			stalledSince: null,
+			runtime: "claude",
+			driverKind: "claude-hooks",
 		};
 
 		store.upsert(session);
+		if (config.control.enabled) {
+			await controlClient.registerAgent({
+				agentName: MONITOR_NAME,
+				sessionId: session.id,
+				runtime: "claude",
+				driverKind: "claude-hooks",
+				tmuxSession,
+				pid,
+			});
+		}
 
 		// Send beacon after TUI initialization delay
 		await Bun.sleep(3_000);
@@ -232,6 +249,7 @@ async function stopMonitor(args: string[]): Promise<void> {
 	const projectRoot = config.project.root;
 
 	const overstoryDir = join(projectRoot, ".overstory");
+	const controlClient = createControlClient(overstoryDir);
 	const { store } = openSessionStore(overstoryDir);
 	try {
 		const session = store.getByName(MONITOR_NAME);
@@ -256,6 +274,9 @@ async function stopMonitor(args: string[]): Promise<void> {
 		// Update session state
 		store.updateState(MONITOR_NAME, "completed");
 		store.updateLastActivity(MONITOR_NAME);
+		if (config.control.enabled) {
+			await controlClient.markOffline(MONITOR_NAME);
+		}
 
 		if (json) {
 			process.stdout.write(`${JSON.stringify({ stopped: true, sessionId: session.id })}\n`);
